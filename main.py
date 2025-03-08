@@ -3,9 +3,19 @@ import requests
 import psycopg2
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi.middleware.cors import CORSMiddleware  # CORS importálása
 
 # FastAPI inicializálás
 app = FastAPI()
+
+# CORS engedélyezése
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Minden domaint engedélyez (biztonsági okokból később szigorítható)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # PostgreSQL kapcsolat
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/crypto")
