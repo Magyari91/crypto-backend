@@ -21,12 +21,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# PostgreSQL kapcsolat
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/crypto")
-conn = psycopg2.connect(DATABASE_URL)
+# PostgreSQL kapcsolat (auto reconnect)
+def get_db_connection():
+    return psycopg2.connect(os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/crypto"))
+
+conn = get_db_connection()
 cursor = conn.cursor()
 
-# Táblázat létrehozása
+# Táblázat létrehozása, ha nem létezik
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS crypto_data (
     id SERIAL PRIMARY KEY,
@@ -45,39 +47,48 @@ CREATE TABLE IF NOT EXISTS crypto_data (
 ''')
 conn.commit()
 
-# API-ból való adatlekérés és mentés
+# API-ból való adatlekérés és adatbázisba mentés
 def fetch_crypto_data():
     try:
         market_url = "https://api.coingecko.com/api/v3/global"
-        market_data = requests.get(market_url).json()
-        
         price_url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,dogecoin&vs_currencies=usd&include_market_cap=true"
+
+        market_data = requests.get(market_url).json()
         price_data = requests.get(price_url).json()
 
-        btc_dominance = market_data['data']['market_cap_percentage']['btc']
-        market_cap_total = market_data['data']['total_market_cap']['usd']
-        
-        btc_price = price_data['bitcoin']['usd']
-        btc_market_cap = price_data['bitcoin']['usd_market_cap']
-        
-        eth_price = price_data['ethereum']['usd']
-        eth_market_cap = price_data['ethereum']['usd_market_cap']
-        
-        doge_price = price_data['dogecoin']['usd']
-        doge_market_cap = price_data['dogecoin']['usd_market_cap']
+        btc_dominance = market_data['data'].get('market_cap_percentage', {}).get('btc', 0)
+        market_cap_total = market_data['data'].get('total_market_cap', {}).get('usd', 0)
 
-        # 🔹 Likvidációs adatok CoinGlass API-ból
-        liquidation_url = "https://api.coinglass.com/api/futures/liquidations"
-        headers = {"coinglassSecret": os.getenv("COINGLASS_API_KEY")}
-        liquidation_data = requests.get(liquidation_url, headers=headers).json()
-        total_liquidation = liquidation_data.get("total", 0)
+        btc_price = price_data.get('bitcoin', {}).get('usd', 0)
+        btc_market_cap = price_data.get('bitcoin', {}).get('usd_market_cap', 0)
+
+        eth_price = price_data.get('ethereum', {}).get('usd', 0)
+        eth_market_cap = price_data.get('ethereum', {}).get('usd_market_cap', 0)
+
+        doge_price = price_data.get('dogecoin', {}).get('usd', 0)
+        doge_market_cap = price_data.get('dogecoin', {}).get('usd_market_cap', 0)
+
+        # 🔹 Likvidációs adatok CoinGlass API-ból (Hibakezeléssel)
+        total_liquidation = 0
+        coinglass_key = os.getenv("COINGLASS_API_KEY", "")
+        if coinglass_key:
+            try:
+                headers = {"coinglassSecret": coinglass_key}
+                liquidation_url = "https://api.coinglass.com/api/futures/liquidations"
+                liquidation_data = requests.get(liquidation_url, headers=headers).json()
+                total_liquidation = liquidation_data.get("total", 0)
+            except Exception as e:
+                print(f"Hiba a likvidációs adatok lekérésekor: {e}")
 
         # 🔹 Átlag RSI számítása
         historical_url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=14"
         historical_data = requests.get(historical_url).json()
-        prices = [point[1] for point in historical_data["prices"]]
-        df = pd.DataFrame({"price": prices})
-        avg_rsi = RSIIndicator(df["price"]).rsi().mean()
+        prices = [point[1] for point in historical_data.get("prices", [])]
+        
+        avg_rsi = None
+        if prices:
+            df = pd.DataFrame({"price": prices})
+            avg_rsi = RSIIndicator(df["price"]).rsi().mean()
 
         # Adatok mentése adatbázisba
         cursor.execute('''
@@ -114,31 +125,40 @@ async def websocket_endpoint(websocket: WebSocket):
 # CoinTelegraph hírek API
 @app.get("/crypto-news")
 def get_crypto_news():
-    url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
-    response = requests.get(url).json()
-    return response["Data"]
+    try:
+        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
+        response = requests.get(url).json()
+        return response.get("Data", [])
+    except Exception as e:
+        return {"error": f"Hiba történt a hírek lekérésekor: {e}"}
 
 # Technikai elemzések (Fibonacci, Ichimoku Cloud, RSI, MACD, Bollinger)
 @app.get("/crypto-indicators")
 def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
-    url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart?vs_currency=usd&days={days}"
-    response = requests.get(url).json()
-    
-    prices = [point[1] for point in response["prices"]]
-    df = pd.DataFrame({"price": prices})
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart?vs_currency=usd&days={days}"
+        response = requests.get(url).json()
+        
+        prices = [point[1] for point in response.get("prices", [])]
+        if not prices:
+            return {"error": "Nincsenek elérhető adatok"}
 
-    df["rsi"] = RSIIndicator(df["price"]).rsi()
-    df["ema"] = EMAIndicator(df["price"], window=14).ema_indicator()
-    df["macd"] = MACD(df["price"]).macd()
-    df["bollinger_upper"] = BollingerBands(df["price"]).bollinger_hband()
-    df["bollinger_lower"] = BollingerBands(df["price"]).bollinger_lband()
+        df = pd.DataFrame({"price": prices})
+        df["rsi"] = RSIIndicator(df["price"]).rsi()
+        df["ema"] = EMAIndicator(df["price"], window=14).ema_indicator()
+        df["macd"] = MACD(df["price"]).macd()
+        df["bollinger_upper"] = BollingerBands(df["price"]).bollinger_hband()
+        df["bollinger_lower"] = BollingerBands(df["price"]).bollinger_lband()
 
-    # 🔹 Ichimoku Cloud számítása
-    ichi = IchimokuIndicator(df["price"])
-    df["ichimoku_base"] = ichi.ichimoku_base_line()
-    df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
+        # 🔹 Ichimoku Cloud számítása
+        ichi = IchimokuIndicator(df["price"])
+        df["ichimoku_base"] = ichi.ichimoku_base_line()
+        df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
+        
+        return df.to_dict(orient="records")
     
-    return df.to_dict(orient="records")
+    except Exception as e:
+        return {"error": f"Hiba történt az indikátorok kiszámításakor: {e}"}
 
 # Scheduler beállítása 10 percenkénti frissítésre
 scheduler = BackgroundScheduler()
