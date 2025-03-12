@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS crypto_data (
 ''')
 conn.commit()
 
-# API-ból való adatlekérés és adatbázisba mentés
+# 🔹 API-ból való adatlekérés és adatbázisba mentés
 def fetch_crypto_data():
     try:
         market_url = "https://api.coingecko.com/api/v3/global"
@@ -68,7 +68,7 @@ def fetch_crypto_data():
         doge_price = price_data.get('dogecoin', {}).get('usd', 0)
         doge_market_cap = price_data.get('dogecoin', {}).get('usd_market_cap', 0)
 
-        # 🔹 Likvidációs adatok CoinGlass API-ból (Hibakezeléssel)
+        # 🔹 Likvidációs adatok CoinGlass API-ból
         total_liquidation = 0
         coinglass_key = os.getenv("COINGLASS_API_KEY", "")
         if coinglass_key:
@@ -90,7 +90,7 @@ def fetch_crypto_data():
             df = pd.DataFrame({"price": prices})
             avg_rsi = RSIIndicator(df["price"]).rsi().mean()
 
-        # Adatok mentése adatbázisba
+        # 🔹 Adatok mentése adatbázisba
         cursor.execute('''
         INSERT INTO crypto_data (market_cap_total, btc_price, btc_market_cap, eth_price, eth_market_cap, doge_price, doge_market_cap, btc_dominance, liquidation, avg_rsi)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -100,7 +100,7 @@ def fetch_crypto_data():
     except Exception as e:
         print(f"Hiba történt az API lekérdezésekor: {e}")
 
-# WebSocket élő adatokhoz
+# 🔹 WebSocket élő adatokhoz
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -122,7 +122,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "avg_rsi": data[11]
             })
 
-# CoinTelegraph hírek API
+# 🔹 CoinTelegraph hírek API
 @app.get("/crypto-news")
 def get_crypto_news():
     try:
@@ -132,7 +132,7 @@ def get_crypto_news():
     except Exception as e:
         return {"error": f"Hiba történt a hírek lekérésekor: {e}"}
 
-# Technikai elemzések (Fibonacci, Ichimoku Cloud, RSI, MACD, Bollinger)
+# 🔹 Technikai elemzések (Fibonacci, Ichimoku Cloud, RSI, MACD, Bollinger)
 @app.get("/crypto-indicators")
 def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
     try:
@@ -160,12 +160,12 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
     except Exception as e:
         return {"error": f"Hiba történt az indikátorok kiszámításakor: {e}"}
 
-# Scheduler beállítása 10 percenkénti frissítésre
+# 🔹 Scheduler beállítása 10 percenkénti frissítésre
 scheduler = BackgroundScheduler()
 scheduler.add_job(fetch_crypto_data, 'interval', minutes=10)
 scheduler.start()
 
-# Fő API elindítása
+# 🔹 Fő API elindítása
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
