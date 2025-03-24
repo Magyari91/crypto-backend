@@ -21,14 +21,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# PostgreSQL kapcsolat (auto reconnect)
+# PostgreSQL kapcsolat
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/crypto"))
 
 conn = get_db_connection()
 cursor = conn.cursor()
 
-# Táblázat létrehozása, ha nem létezik
+# Táblázat létrehozása
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS crypto_data (
     id SERIAL PRIMARY KEY,
@@ -68,7 +68,6 @@ def fetch_crypto_data():
         doge_price = price_data.get('dogecoin', {}).get('usd', 0)
         doge_market_cap = price_data.get('dogecoin', {}).get('usd_market_cap', 0)
 
-        # 🔹 Likvidációs adatok CoinGlass API-ból
         total_liquidation = 0
         coinglass_key = os.getenv("COINGLASS_API_KEY", "")
         if coinglass_key:
@@ -80,7 +79,6 @@ def fetch_crypto_data():
             except Exception as e:
                 print(f"Hiba a likvidációs adatok lekérésekor: {e}")
 
-        # 🔹 Átlag RSI számítása
         historical_url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=14"
         historical_data = requests.get(historical_url).json()
         prices = [point[1] for point in historical_data.get("prices", [])]
@@ -90,7 +88,6 @@ def fetch_crypto_data():
             df = pd.DataFrame({"price": prices})
             avg_rsi = RSIIndicator(df["price"]).rsi().mean()
 
-        # 🔹 Adatok mentése adatbázisba
         cursor.execute('''
         INSERT INTO crypto_data (market_cap_total, btc_price, btc_market_cap, eth_price, eth_market_cap, doge_price, doge_market_cap, btc_dominance, liquidation, avg_rsi)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -122,7 +119,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "avg_rsi": data[11]
             })
 
-# 🔹 CoinTelegraph hírek API
+# 🔹 Hírek
 @app.get("/crypto-news")
 def get_crypto_news():
     try:
@@ -132,7 +129,7 @@ def get_crypto_news():
     except Exception as e:
         return {"error": f"Hiba történt a hírek lekérésekor: {e}"}
 
-# 🔹 Technikai elemzések (Fibonacci, Ichimoku Cloud, RSI, MACD, Bollinger)
+# 🔹 Technikai indikátorok
 @app.get("/crypto-indicators")
 def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
     try:
@@ -150,7 +147,6 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
         df["bollinger_upper"] = BollingerBands(df["price"]).bollinger_hband()
         df["bollinger_lower"] = BollingerBands(df["price"]).bollinger_lband()
 
-        # 🔹 Ichimoku Cloud számítása
         ichi = IchimokuIndicator(df["price"])
         df["ichimoku_base"] = ichi.ichimoku_base_line()
         df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
@@ -160,12 +156,46 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
     except Exception as e:
         return {"error": f"Hiba történt az indikátorok kiszámításakor: {e}"}
 
-# 🔹 Scheduler beállítása 10 percenkénti frissítésre
+# 🔹 ÚJ: Market Overview
+@app.get("/market-overview")
+def market_overview():
+    try:
+        cursor.execute("SELECT * FROM crypto_data ORDER BY timestamp DESC LIMIT 1;")
+        data = cursor.fetchone()
+        if data:
+            return {
+                "market_cap_total": float(data[2]),
+                "btc_dominance": float(data[9]),
+                "liquidation": float(data[10]),
+                "avg_rsi": float(data[11])
+            }
+        return {"error": "Nincs elérhető adat"}
+    except Exception as e:
+        return {"error": f"Hiba történt: {e}"}
+
+# 🔹 ÚJ: CoinGecko adat proxy
+@app.get("/crypto-data")
+def crypto_data():
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 50,
+            "page": 1,
+            "sparkline": False
+        }
+        response = requests.get(url, params=params)
+        return response.json()
+    except Exception as e:
+        return {"error": f"Adatlekérés sikertelen: {e}"}
+
+# 🔹 Ütemezett frissítés
 scheduler = BackgroundScheduler()
 scheduler.add_job(fetch_crypto_data, 'interval', minutes=10)
 scheduler.start()
 
-# 🔹 Fő API elindítása
+# 🔹 Futás
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
