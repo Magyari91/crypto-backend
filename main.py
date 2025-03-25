@@ -135,22 +135,28 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart?vs_currency=usd&days={days}"
         response = requests.get(url).json()
-        
-        prices = [point[1] for point in response.get("prices", [])]
-        if not prices:
+
+        prices_raw = response.get("prices", [])
+        if not prices_raw:
             return {"error": "Nincsenek elérhető adatok"}
 
-        df = pd.DataFrame({"high": prices, "low": prices, "close": prices})
-        df["rsi"] = RSIIndicator(df["price"]).rsi()
-        df["ema"] = EMAIndicator(df["price"], window=14).ema_indicator()
-        df["macd"] = MACD(df["price"]).macd()
-        df["bollinger_upper"] = BollingerBands(df["price"]).bollinger_hband()
-        df["bollinger_lower"] = BollingerBands(df["price"]).bollinger_lband()
+        # Feltételezett árfolyamok - minden értékhez ugyanazt használjuk
+        df = pd.DataFrame({
+            "close": [p[1] for p in prices_raw],
+            "high": [p[1] for p in prices_raw],
+            "low": [p[1] for p in prices_raw],
+        })
+
+        df["rsi"] = RSIIndicator(df["close"]).rsi()
+        df["ema"] = EMAIndicator(df["close"], window=14).ema_indicator()
+        df["macd"] = MACD(df["close"]).macd()
+        df["bollinger_upper"] = BollingerBands(df["close"]).bollinger_hband()
+        df["bollinger_lower"] = BollingerBands(df["close"]).bollinger_lband()
 
         ichi = IchimokuIndicator(high=df["high"], low=df["low"], close=df["close"])
         df["ichimoku_base"] = ichi.ichimoku_base_line()
         df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
-        
+
         return df.to_dict(orient="records")
     
     except Exception as e:
