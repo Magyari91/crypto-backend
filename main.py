@@ -153,17 +153,10 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 90):
         df["bollinger_upper"] = BollingerBands(close=df["close"], window=20).bollinger_hband()
         df["bollinger_lower"] = BollingerBands(close=df["close"], window=20).bollinger_lband()
 
-        ichi = IchimokuIndicator(
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            window1=9,
-            window2=26,
-            window3=52,
-            visual=True,
-        )
+        ichi = IchimokuIndicator(df["high"], df["low"], df["close"], window1=9, window2=26, window3=52, visual=True)
         df["ichimoku_base"] = ichi.ichimoku_base_line()
         df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
+
 
         return df.to_dict(orient="records")
 
