@@ -131,7 +131,7 @@ def get_crypto_news():
 
 # 🔹 Technikai indikátorok
 @app.get("/crypto-indicators")
-def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
+def get_crypto_indicators(coin: str = "bitcoin", days: int = 90):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart?vs_currency=usd&days={days}"
         response = requests.get(url).json()
