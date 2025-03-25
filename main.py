@@ -140,14 +140,14 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 30):
         if not prices:
             return {"error": "Nincsenek elérhető adatok"}
 
-        df = pd.DataFrame({"price": prices})
+        df = pd.DataFrame({"high": prices, "low": prices, "close": prices})
         df["rsi"] = RSIIndicator(df["price"]).rsi()
         df["ema"] = EMAIndicator(df["price"], window=14).ema_indicator()
         df["macd"] = MACD(df["price"]).macd()
         df["bollinger_upper"] = BollingerBands(df["price"]).bollinger_hband()
         df["bollinger_lower"] = BollingerBands(df["price"]).bollinger_lband()
 
-        ichi = IchimokuIndicator(df["price"])
+        ichi = IchimokuIndicator(high=df["high"], low=df["low"], close=df["close"])
         df["ichimoku_base"] = ichi.ichimoku_base_line()
         df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
         
