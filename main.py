@@ -140,25 +140,33 @@ def get_crypto_indicators(coin: str = "bitcoin", days: int = 90):
         if not prices_raw:
             return {"error": "Nincsenek elérhető adatok"}
 
-        # Feltételezett árfolyamok - minden értékhez ugyanazt használjuk
         df = pd.DataFrame({
             "close": [p[1] for p in prices_raw],
             "high": [p[1] for p in prices_raw],
             "low": [p[1] for p in prices_raw],
         })
 
-        df["rsi"] = RSIIndicator(df["close"]).rsi()
-        df["ema"] = EMAIndicator(df["close"], window=14).ema_indicator()
-        df["macd"] = MACD(df["close"]).macd()
-        df["bollinger_upper"] = BollingerBands(df["close"]).bollinger_hband()
-        df["bollinger_lower"] = BollingerBands(df["close"]).bollinger_lband()
+        # Technikai indikátorok explicit paraméterezéssel
+        df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
+        df["ema"] = EMAIndicator(close=df["close"], window=14).ema_indicator()
+        df["macd"] = MACD(close=df["close"]).macd()
+        df["bollinger_upper"] = BollingerBands(close=df["close"], window=20).bollinger_hband()
+        df["bollinger_lower"] = BollingerBands(close=df["close"], window=20).bollinger_lband()
 
-        ichi = IchimokuIndicator(df["high"], df["low"], df["close"])
+        ichi = IchimokuIndicator(
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            window1=9,
+            window2=26,
+            window3=52,
+            visual=True,
+        )
         df["ichimoku_base"] = ichi.ichimoku_base_line()
         df["ichimoku_conversion"] = ichi.ichimoku_conversion_line()
 
         return df.to_dict(orient="records")
-    
+
     except Exception as e:
         return {"error": f"Hiba történt az indikátorok kiszámításakor: {e}"}
 
