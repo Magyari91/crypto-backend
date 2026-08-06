@@ -20,7 +20,7 @@ class UpstreamServiceError(RuntimeError):
 
 
 class MarketDataService:
-    UPSTREAM_RETRY_SECONDS = 60
+    UPSTREAM_RETRY_SECONDS = 300
     COINGECKO_URL = "https://api.coingecko.com/api/v3"
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     BINANCE_MARKET_URL = "https://data-api.binance.vision/api/v3"
