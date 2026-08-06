@@ -1,6 +1,8 @@
 import asyncio
 
-from app.market_data import MarketDataService
+import pytest
+
+from app.market_data import MarketDataService, UpstreamServiceError
 
 
 class BinanceHistoryService(MarketDataService):
@@ -161,3 +163,36 @@ def test_supported_markets_normalizes_binance_tickers():
     assert markets[0]["current_price"] == "64500.5"
     assert markets[1]["price_change_percentage_24h"] == "-1.2"
     assert "BTCUSDT" in service.params["symbols"]
+
+
+class InvalidJsonResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        raise ValueError("invalid json")
+
+
+class CountingFailingClient:
+    def __init__(self):
+        self.calls = 0
+
+    async def get(self, *args, **kwargs):
+        self.calls += 1
+        return InvalidJsonResponse()
+
+
+def test_upstream_circuit_breaker_skips_repeated_failed_requests():
+    service = MarketDataService()
+    client = CountingFailingClient()
+    service._client = client
+
+    async def call_twice():
+        with pytest.raises(UpstreamServiceError):
+            await service._get_json("CoinGecko", "https://example.test/one", None, 60)
+        with pytest.raises(UpstreamServiceError):
+            await service._get_json("CoinGecko", "https://example.test/two", None, 60)
+
+    asyncio.run(call_twice())
+
+    assert client.calls == 1

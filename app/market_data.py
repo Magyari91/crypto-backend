@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Any
 from urllib.parse import urlencode
 
@@ -19,6 +20,7 @@ class UpstreamServiceError(RuntimeError):
 
 
 class MarketDataService:
+    UPSTREAM_RETRY_SECONDS = 60
     COINGECKO_URL = "https://api.coingecko.com/api/v3"
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     BINANCE_MARKET_URL = "https://data-api.binance.vision/api/v3"
@@ -51,6 +53,17 @@ class MarketDataService:
     def __init__(self):
         self._client: httpx2.AsyncClient | None = None
         self._cache = AsyncTTLCache(settings.stale_cache_seconds)
+        self._upstream_retry_at: dict[str, float] = {}
+
+    def _ensure_upstream_available(self, service: str) -> None:
+        if self._upstream_retry_at.get(service, 0) > monotonic():
+            raise UpstreamServiceError(service, "Upstream retry cooldown is active")
+
+    def _mark_upstream_available(self, service: str) -> None:
+        self._upstream_retry_at.pop(service, None)
+
+    def _mark_upstream_unavailable(self, service: str) -> None:
+        self._upstream_retry_at[service] = monotonic() + self.UPSTREAM_RETRY_SECONDS
 
     async def start(self) -> None:
         timeout = httpx2.Timeout(settings.request_timeout_seconds)
@@ -80,12 +93,16 @@ class MarketDataService:
         async def loader() -> Any:
             if self._client is None:
                 raise RuntimeError("MarketDataService has not been started")
+            self._ensure_upstream_available(service)
             try:
                 response = await self._client.get(url, params=params, headers=headers)
                 response.raise_for_status()
-                return response.json()
+                payload = response.json()
             except (httpx2.HTTPError, ValueError) as exc:
+                self._mark_upstream_unavailable(service)
                 raise UpstreamServiceError(service, str(exc)) from exc
+            self._mark_upstream_available(service)
+            return payload
 
         return await self._cache.get_or_set(cache_key, cache_seconds, loader)
 
@@ -101,14 +118,18 @@ class MarketDataService:
         async def loader() -> bytes:
             if self._client is None:
                 raise RuntimeError("MarketDataService has not been started")
+            self._ensure_upstream_available(service)
             try:
                 response = await self._client.get(url, headers=headers, follow_redirects=True)
                 response.raise_for_status()
                 if len(response.content) > MAX_FEED_BYTES:
                     raise ValueError("Feed response is too large")
-                return response.content
+                payload = response.content
             except (httpx2.HTTPError, ValueError) as exc:
+                self._mark_upstream_unavailable(service)
                 raise UpstreamServiceError(service, str(exc)) from exc
+            self._mark_upstream_available(service)
+            return payload
 
         return await self._cache.get_or_set(cache_key, cache_seconds, loader)
 
