@@ -88,3 +88,6 @@ def test_dashboard_contract():
     assert payload["movers"]["gainers"][0]["symbol"] == "BTC"
     assert payload["movers"]["losers"][0]["symbol"] == "ETH"
     assert payload["news"][0]["source"] == "Example"
+    assert payload["derivatives"]["available"] is False
+    assert payload["news_sentiment"]["sample_size"] == 1
+    assert "distribution_shift" in payload["selected"]["forecast"]["probability_forecast"]

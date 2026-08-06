@@ -12,6 +12,37 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 _IMAGE_SOURCE = re.compile(r"<img[^>]+src=[\"']([^\"']+)", re.IGNORECASE)
 _WHITESPACE = re.compile(r"\s+")
 
+_POSITIVE_TERMS = (
+    "adoption",
+    "approval",
+    "approved",
+    "bullish",
+    "gain",
+    "growth",
+    "inflow",
+    "launch",
+    "partnership",
+    "rally",
+    "record high",
+    "surge",
+    "upgrade",
+)
+_NEGATIVE_TERMS = (
+    "attack",
+    "ban",
+    "bearish",
+    "crash",
+    "decline",
+    "exploit",
+    "fraud",
+    "hack",
+    "lawsuit",
+    "liquidation",
+    "loss",
+    "outflow",
+    "plunge",
+)
+
 _COIN_KEYWORDS = {
     "bitcoin": ("bitcoin", "btc"),
     "ethereum": ("ethereum", "ether", "eth"),
@@ -119,6 +150,50 @@ def _canonical_url(value: str) -> str:
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
 
 
+def article_sentiment(title: str, summary: str = "") -> dict[str, Any]:
+    haystack = f"{title} {title} {summary}".casefold()
+    positive = sum(haystack.count(term) for term in _POSITIVE_TERMS)
+    negative = sum(haystack.count(term) for term in _NEGATIVE_TERMS)
+    observations = positive + negative
+    score = (positive - negative) / observations if observations else 0.0
+    if score > 0.15:
+        label = "positive"
+    elif score < -0.15:
+        label = "negative"
+    else:
+        label = "neutral"
+    return {
+        "score": round(max(-1.0, min(1.0, score)), 3),
+        "label": label,
+        "method": "headline_lexicon_v1",
+    }
+
+
+def aggregate_news_sentiment(
+    articles: list[dict[str, Any]],
+    coin_id: str | None = None,
+) -> dict[str, Any]:
+    relevant = [
+        article
+        for article in articles
+        if not coin_id or coin_id in article.get("related_coin_ids", [])
+    ]
+    selected = relevant or articles
+    scores = [
+        float(article.get("sentiment", {}).get("score", 0.0))
+        for article in selected
+    ]
+    score = sum(scores) / len(scores) if scores else 0.0
+    label = "positive" if score > 0.15 else "negative" if score < -0.15 else "neutral"
+    return {
+        "score": round(score, 3),
+        "label": label,
+        "sample_size": len(scores),
+        "coin_specific": bool(relevant),
+        "method": "headline_lexicon_v1",
+    }
+
+
 def parse_rss_feed(payload: bytes, source: str) -> list[dict[str, Any]]:
     if not payload or len(payload) > MAX_FEED_BYTES:
         raise ValueError("A hírfolyam mérete érvénytelen")
@@ -194,6 +269,7 @@ def normalize_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "summary": summary,
                 "category": article.get("category") or article.get("categories"),
                 "related_coin_ids": list(related),
+                "sentiment": article_sentiment(title, summary),
             }
         )
     return normalized

@@ -70,3 +70,39 @@ def test_store_persists_probability_audit_fields(tmp_path):
     assert record["event_target_return_pct"] == 1.0
     assert record["probability_model_active"] is True
     assert record["probability_decision"] == "buy_candidate"
+
+
+def test_store_persists_point_in_time_feature_snapshots(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+
+    created = store.record_feature_snapshot(
+        coin_id="bitcoin",
+        symbol="BTC",
+        generated_at="2026-07-10T12:01:00+00:00",
+        horizon_days=7,
+        market={"current_price": 100.0},
+        technical={"rsi": 52.0},
+        derivatives={"available": True, "funding_rate_pct": 0.01},
+        news_sentiment={"score": 0.25, "sample_size": 4},
+        model={"model_version": "5.0.0", "probability": {"active": False}},
+    )
+    duplicate = store.record_feature_snapshot(
+        coin_id="bitcoin",
+        symbol="BTC",
+        generated_at="2026-07-10T12:12:00+00:00",
+        horizon_days=7,
+        market={"current_price": 101.0},
+        technical={"rsi": 53.0},
+        derivatives={"available": True},
+        news_sentiment={"score": 0.3},
+        model={"model_version": "5.0.0"},
+    )
+
+    status = store.feature_status("bitcoin", 7)
+    assert created is True
+    assert duplicate is False
+    assert status["sample_count"] == 1
+    assert status["feature_version"] == "1.0.0"
+    assert status["latest_derivatives"]["funding_rate_pct"] == 0.01
+    assert status["latest_model"]["model_version"] == "5.0.0"

@@ -78,7 +78,7 @@ def test_forecast_analytics_endpoint(tmp_path):
     payload = response.json()
     assert payload["asset"]["symbol"] == "BTC"
     assert payload["backtest"]["summary"]["samples"] > 50
-    assert payload["backtest"]["model"]["version"] == "4.0.0"
+    assert payload["backtest"]["model"]["version"] == "5.0.0"
     probability = payload["backtest"]["summary"]["probability"]
     assert probability["target_return_pct"] == 1.0
     assert 0 <= probability["brier_score"] <= 1
@@ -109,3 +109,24 @@ def test_forecast_model_lab_rejects_daily_long_horizon():
 
     assert response.status_code == 422
     assert "1 vagy 7 napos" in response.json()["detail"]
+
+
+def test_forecast_registry_exposes_challengers_and_feature_status(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.get("/api/v1/forecast/registry?coin=bitcoin&horizon=7")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model_version"] == "5.0.0"
+    assert payload["feature_store"]["sample_count"] == 0
+    seven_day = next(
+        item for item in payload["probability_models"] if item["horizon_days"] == 7
+    )
+    assert [item["key"] for item in seven_day["candidates"]] == [
+        "logistic",
+        "hist_gradient_boosting",
+    ]

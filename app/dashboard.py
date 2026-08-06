@@ -4,7 +4,7 @@ from typing import Any
 
 from app.forecast import build_forecast, calculate_indicators
 from app.market_data import MarketDataService, UpstreamServiceError
-from app.news import normalize_articles
+from app.news import aggregate_news_sentiment, normalize_articles
 
 
 SUPPORTED_COINS = {
@@ -113,12 +113,14 @@ async def build_dashboard(
         raise ValueError("A kiválasztott eszköz nem található a piaci listában")
 
     selected = _market_row(selected_raw)
-    selected["forecast"] = build_forecast(
+    selected["forecast"] = await asyncio.to_thread(
+        build_forecast,
         chart.get("prices", []),
         horizon_days,
         current_price=selected["current_price"],
         volumes=chart.get("total_volumes", []),
         market_prices=benchmark_chart.get("prices", []),
+        funding_rates=chart.get("funding_rates", []),
     )
     selected["forecast"]["data_source"] = chart.get("source", "CoinGecko")
     selected["forecast"]["history_days"] = len(chart.get("prices", []))
@@ -129,6 +131,7 @@ async def build_dashboard(
 
     fear_value = int(fear_greed.get("value", 0)) if fear_greed else None
     fear_label = fear_greed.get("value_classification") if fear_greed else None
+    news_rows = normalize_news(articles)
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -141,13 +144,22 @@ async def build_dashboard(
             "active_cryptocurrencies": int(global_data.get("active_cryptocurrencies", 0)),
             "fear_greed": {"value": fear_value, "label": fear_label},
         },
+        "derivatives": chart.get(
+            "derivatives",
+            {
+                "available": False,
+                "source": "Binance USDⓈ-M Futures",
+                "status": "unavailable",
+            },
+        ),
+        "news_sentiment": aggregate_news_sentiment(news_rows, selected_coin),
         "selected": selected,
         "movers": {
             "gainers": sorted_movers[:5],
             "losers": list(reversed(sorted_movers[-5:])),
         },
         "watchlist": market_rows[:10],
-        "news": normalize_news(articles)[:6],
+        "news": news_rows[:6],
         "supported_coins": [
             {"id": coin_id, **metadata} for coin_id, metadata in SUPPORTED_COINS.items()
         ],

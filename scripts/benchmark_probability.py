@@ -33,6 +33,7 @@ async def benchmark(
                     prices[-1][1],
                     history.get("total_volumes", []),
                     bitcoin_history["prices"],
+                    funding_rates=history.get("funding_rates", []),
                 )
                 probability = forecast["probability_forecast"]
                 result = {
@@ -50,6 +51,9 @@ async def benchmark(
                         ],
                         "active": probability["active"],
                         "family": probability["model"]["family"],
+                        "validation_candidates": probability["calibration"][
+                            "validation_candidates"
+                        ],
                         "decision": probability["decision"]["key"],
                         "holdout_brier_skill_pct": probability["calibration"][
                             "holdout_brier_skill_pct"
@@ -74,6 +78,11 @@ async def benchmark(
                         "historical_total_checks": probability["stability"][
                             "historical_total_checks"
                         ],
+                        "distribution_shift": probability["distribution_shift"],
+                        "funding_history_days": history.get("derivatives", {}).get(
+                            "funding_history_days",
+                            0,
+                        ),
                         "reason": probability["reason"],
                     }
                 if walk_forward_samples > 0:
@@ -84,6 +93,7 @@ async def benchmark(
                         history.get("total_volumes", []),
                         walk_forward_samples,
                         bitcoin_history["prices"],
+                        funding_rates=history.get("funding_rates", []),
                     )
                     result["walk_forward"] = backtest["summary"]["probability"]
                 output.append(result)

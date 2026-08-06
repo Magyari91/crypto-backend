@@ -1,4 +1,10 @@
-from app.news import merge_articles, normalize_articles, parse_rss_feed
+from app.news import (
+    aggregate_news_sentiment,
+    article_sentiment,
+    merge_articles,
+    normalize_articles,
+    parse_rss_feed,
+)
 
 
 RSS_SAMPLE = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -104,3 +110,27 @@ def test_merge_deduplicates_and_keeps_sources_varied():
         "Decrypt",
         "Cointelegraph",
     ]
+
+
+def test_news_sentiment_is_coin_specific_and_auditable():
+    articles = normalize_articles(
+        [
+            {
+                "title": "Bitcoin ETF inflow supports a bullish rally",
+                "summary": "Adoption growth continues",
+                "url": "https://example.test/bitcoin-positive",
+                "source": "Example",
+            },
+            {
+                "title": "Solana exploit triggers losses",
+                "url": "https://example.test/solana-negative",
+                "source": "Example",
+            },
+        ]
+    )
+
+    bitcoin = aggregate_news_sentiment(articles, "bitcoin")
+    assert article_sentiment("Market update")["label"] == "neutral"
+    assert bitcoin["coin_specific"] is True
+    assert bitcoin["sample_size"] == 1
+    assert bitcoin["label"] == "positive"

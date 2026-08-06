@@ -1,10 +1,12 @@
 from math import pi, sin
 
 from app.probability_models import (
+    FEATURE_NAMES,
     _purged_blocks,
     build_probability_feature_vector,
     prepare_probability_data,
     probability_from_state,
+    probability_registry_payload,
     train_probability_model,
 )
 
@@ -71,3 +73,27 @@ def test_single_class_history_keeps_probability_model_in_reserve():
     assert state.active is False
     assert state.estimator is None
     assert "egy osztályt" in state.reason
+
+
+def test_probability_features_include_temporal_and_funding_context():
+    prices, volumes, market = cyclical_market(days=240)
+    funding = [0.01 + sin(2 * pi * index / 14) * 0.005 for index in range(240)]
+
+    features = build_probability_feature_vector(prices, volumes, market, funding)
+    mapped = dict(zip(FEATURE_NAMES, features))
+
+    assert len(features) == len(FEATURE_NAMES)
+    assert mapped["funding_available"] == 1.0
+    assert mapped["funding_rate_7d"] != 0
+    assert mapped["lag_return_7d"] != 0
+
+
+def test_probability_registry_uses_horizon_specific_candidates():
+    registry = {
+        item["horizon_days"]: [candidate["key"] for candidate in item["candidates"]]
+        for item in probability_registry_payload()
+    }
+
+    assert registry[1] == ["hist_gradient_boosting", "extra_trees"]
+    assert registry[7] == ["logistic", "hist_gradient_boosting"]
+    assert registry[30] == ["logistic"]

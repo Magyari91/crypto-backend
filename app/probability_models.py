@@ -5,7 +5,7 @@ from random import Random
 from statistics import mean, stdev
 from typing import Any
 
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
@@ -16,6 +16,11 @@ FEATURE_LOOKBACK_DAYS = 201
 CALIBRATION_METHOD = "Platt-kalibráció"
 BUY_THRESHOLDS = (0.55, 0.60, 0.65, 0.70, 0.75)
 CALIBRATION_SHRINKAGE = (0.0, 0.25, 0.50, 0.75, 1.0)
+HORIZON_CANDIDATES = {
+    1: ("hist_gradient_boosting", "extra_trees"),
+    7: ("logistic", "hist_gradient_boosting"),
+    30: ("logistic",),
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,12 @@ FEATURE_NAMES = (
     "return_14d",
     "return_30d",
     "return_60d",
+    "lag_return_2d",
+    "lag_return_3d",
+    "lag_return_4d",
+    "lag_return_5d",
+    "lag_return_6d",
+    "lag_return_7d",
     "volatility_7d",
     "volatility_30d",
     "downside_volatility_30d",
@@ -89,6 +100,11 @@ FEATURE_NAMES = (
     "market_price_sma200",
     "relative_strength_7d",
     "relative_strength_30d",
+    "funding_rate_1d",
+    "funding_rate_7d",
+    "funding_rate_30d",
+    "funding_zscore_30d",
+    "funding_available",
 )
 
 
@@ -99,6 +115,12 @@ FEATURE_LABELS = {
     "return_14d": "14 napos momentum",
     "return_30d": "30 napos momentum",
     "return_60d": "60 napos momentum",
+    "lag_return_2d": "2 nappal korábbi napi hozam",
+    "lag_return_3d": "3 nappal korábbi napi hozam",
+    "lag_return_4d": "4 nappal korábbi napi hozam",
+    "lag_return_5d": "5 nappal korábbi napi hozam",
+    "lag_return_6d": "6 nappal korábbi napi hozam",
+    "lag_return_7d": "7 nappal korábbi napi hozam",
     "volatility_7d": "7 napos volatilitás",
     "volatility_30d": "30 napos volatilitás",
     "downside_volatility_30d": "negatív hozamok szórása",
@@ -117,6 +139,11 @@ FEATURE_LABELS = {
     "market_price_sma200": "BTC ár/SMA200 trend",
     "relative_strength_7d": "7 napos relatív erő",
     "relative_strength_30d": "30 napos relatív erő",
+    "funding_rate_1d": "aktuális funding rate",
+    "funding_rate_7d": "7 napos funding átlag",
+    "funding_rate_30d": "30 napos funding átlag",
+    "funding_zscore_30d": "funding rate z-score",
+    "funding_available": "funding adatok teljessége",
 }
 
 
@@ -160,6 +187,9 @@ class ProbabilityState:
     historical_mean_skill_pct: float
     historical_positive_checks: int
     historical_total_checks: int
+    drift_score: float
+    drift_status: str
+    drift_features: list[dict[str, Any]]
     reliability_bins: list[dict[str, Any]]
     top_features: list[dict[str, Any]]
     validation_candidates: dict[str, dict[str, float]]
@@ -242,6 +272,31 @@ def _volume_features(volumes: list[float | None]) -> tuple[float, float, float, 
     )
 
 
+def _funding_features(
+    funding_rates: list[float | None],
+) -> tuple[float, float, float, float, float]:
+    recent = funding_rates[-30:]
+    valid = [
+        float(value)
+        for value in recent
+        if value is not None and isfinite(float(value))
+    ]
+    availability = len(valid) / len(recent) if recent else 0.0
+    if not valid:
+        return 0.0, 0.0, 0.0, 0.0, availability
+    latest = valid[-1]
+    seven_day = mean(valid[-7:])
+    thirty_day = mean(valid)
+    zscore = _zscore(valid) if len(valid) > 1 else 0.0
+    return (
+        _clamp(latest, -5.0, 5.0),
+        _clamp(seven_day, -5.0, 5.0),
+        _clamp(thirty_day, -5.0, 5.0),
+        _clamp(zscore, -6.0, 6.0),
+        availability,
+    )
+
+
 def _aligned_series(values: list[float], fallback: list[float]) -> list[float]:
     aligned = [float(value) for value in values[: len(fallback)] if float(value) > 0]
     if len(aligned) != len(fallback):
@@ -253,6 +308,7 @@ def build_probability_feature_vector(
     values: list[float],
     volumes: list[float | None],
     market_values: list[float],
+    funding_rates: list[float | None] | None = None,
 ) -> list[float]:
     if len(values) < FEATURE_LOOKBACK_DAYS:
         raise ValueError("Legalább 201 napi adat szükséges a valószínűségi modellhez.")
@@ -272,6 +328,9 @@ def build_probability_feature_vector(
     volume_ratio, volume_zscore, volume_change, volume_available = _volume_features(
         volumes
     )
+    funding_rate, funding_7d, funding_30d, funding_zscore, funding_available = (
+        _funding_features(funding_rates or [])
+    )
     return_7 = _return_pct(values, 7)
     return_30 = _return_pct(values, 30)
     market_return_7 = _return_pct(market_values, 7)
@@ -284,6 +343,7 @@ def build_probability_feature_vector(
         _return_pct(values, 14),
         return_30,
         _return_pct(values, 60),
+        *(daily_returns[-lag] if len(daily_returns) >= lag else 0.0 for lag in range(2, 8)),
         stdev(recent_7) if len(recent_7) > 1 else 0.0,
         stdev(recent_30) if len(recent_30) > 1 else 0.0,
         stdev(downside) if len(downside) > 1 else 0.0,
@@ -302,6 +362,11 @@ def build_probability_feature_vector(
         ((market_values[-1] / market_sma200) - 1) * 100 if market_sma200 > 0 else 0.0,
         return_7 - market_return_7,
         return_30 - market_return_30,
+        funding_rate,
+        funding_7d,
+        funding_30d,
+        funding_zscore,
+        funding_available,
     ]
     return [_finite(value) for value in features]
 
@@ -311,6 +376,7 @@ def prepare_probability_data(
     volumes: list[float | None],
     market_values: list[float],
     horizon_days: int,
+    funding_rates: list[float | None] | None = None,
 ) -> PreparedProbabilityData:
     if horizon_days not in PROBABILITY_REGISTRY:
         raise ValueError("Az időtáv 1, 7 vagy 30 nap lehet.")
@@ -319,6 +385,9 @@ def prepare_probability_data(
     if len(aligned_volumes) < len(values):
         aligned_volumes.extend([None] * (len(values) - len(aligned_volumes)))
     aligned_market = _aligned_series(market_values, values)
+    aligned_funding = list((funding_rates or [])[: len(values)])
+    if len(aligned_funding) < len(values):
+        aligned_funding.extend([None] * (len(values) - len(aligned_funding)))
     threshold = PROBABILITY_REGISTRY[horizon_days].target_return_pct
     features_by_origin: dict[int, list[float]] = {}
     targets_by_origin: dict[int, int] = {}
@@ -329,6 +398,7 @@ def prepare_probability_data(
             values[: origin + 1],
             aligned_volumes[: origin + 1],
             aligned_market[: origin + 1],
+            aligned_funding[: origin + 1],
         )
         if origin + horizon_days < len(values):
             future_return = (
@@ -365,6 +435,16 @@ def _make_estimator(candidate_key: str):
                 ),
             ]
         )
+    if candidate_key == "extra_trees":
+        return ExtraTreesClassifier(
+            n_estimators=80,
+            max_depth=8,
+            min_samples_leaf=12,
+            max_features=0.7,
+            class_weight="balanced",
+            n_jobs=1,
+            random_state=42,
+        )
     return HistGradientBoostingClassifier(
         learning_rate=0.045,
         max_iter=110,
@@ -379,6 +459,8 @@ def _make_estimator(candidate_key: str):
 def _candidate_family(candidate_key: str) -> str:
     if candidate_key == "logistic":
         return "Kalibrált Logistic Regression"
+    if candidate_key == "extra_trees":
+        return "Kalibrált temporális Extra Trees"
     return "Kalibrált HistGradientBoosting"
 
 
@@ -618,6 +700,47 @@ def _temporal_block_skills(
     return skills
 
 
+def _feature_drift(
+    training_features: list[list[float]],
+    holdout_features: list[list[float]],
+) -> tuple[float, str, list[dict[str, Any]]]:
+    if not training_features or not holdout_features:
+        return 0.0, "insufficient", []
+
+    shifts = []
+    for feature_index, name in enumerate(FEATURE_NAMES):
+        training_values = [row[feature_index] for row in training_features]
+        holdout_values = [row[feature_index] for row in holdout_features]
+        training_deviation = stdev(training_values) if len(training_values) > 1 else 0.0
+        holdout_deviation = stdev(holdout_values) if len(holdout_values) > 1 else 0.0
+        pooled_deviation = sqrt(
+            (training_deviation**2 + holdout_deviation**2) / 2
+        )
+        mean_shift = abs(mean(holdout_values) - mean(training_values))
+        standardized_shift = (
+            mean_shift / pooled_deviation
+            if pooled_deviation > 1e-9
+            else (0.0 if mean_shift <= 1e-9 else 2.0)
+        )
+        shifts.append((name, min(standardized_shift, 3.0)))
+
+    ranked = sorted(shifts, key=lambda item: item[1], reverse=True)
+    score = mean(value for _name, value in ranked[:5]) if ranked else 0.0
+    status = "stable" if score < 0.5 else "watch" if score < 1.0 else "elevated"
+    return (
+        round(score, 3),
+        status,
+        [
+            {
+                "key": name,
+                "label": FEATURE_LABELS[name],
+                "standardized_shift": round(value, 3),
+            }
+            for name, value in ranked[:5]
+        ],
+    )
+
+
 def _permutation_importance(
     estimator,
     calibrator,
@@ -679,7 +802,7 @@ def _empty_state(
         estimator=None,
         calibrator=None,
         candidate_key=None,
-        family="Logistic Regression / HistGradientBoosting",
+        family="Horizont-specifikus kalibrált modelljelöltek",
         available=False,
         active=False,
         baseline_probability=baseline,
@@ -705,6 +828,9 @@ def _empty_state(
         historical_mean_skill_pct=0.0,
         historical_positive_checks=0,
         historical_total_checks=0,
+        drift_score=0.0,
+        drift_status="insufficient",
+        drift_features=[],
         reliability_bins=[],
         top_features=[],
         validation_candidates={},
@@ -768,7 +894,7 @@ def train_probability_model(
     validation_baseline = _event_rate(labels(training + calibration))
     validation_actual = labels(validation)
 
-    for candidate_key in ("logistic", "hist_gradient_boosting"):
+    for candidate_key in HORIZON_CANDIDATES[prepared.horizon_days]:
         estimator = _fit_estimator(
             _make_estimator(candidate_key),
             features(training),
@@ -828,6 +954,10 @@ def train_probability_model(
     )
     holdout_actual = labels(holdout)
     holdout_features = features(holdout)
+    drift_score, drift_status, drift_features = _feature_drift(
+        features(training + calibration),
+        holdout_features,
+    )
     baseline_probability = _event_rate(labels(training + calibration + validation))
     holdout_probabilities = _shrink_probabilities(
         calibrated_probabilities(
@@ -880,6 +1010,7 @@ def train_probability_model(
         and positive_blocks >= 2
         and stability_mean > 0
         and class_counts_are_safe
+        and drift_status != "elevated"
     )
 
     if active:
@@ -899,6 +1030,8 @@ def train_probability_model(
         reason = "A valószínűségi modell nem volt stabil több időrendi blokkban."
     elif auc is None or auc < 0.52:
         reason = "A modell rangsorolási képessége még nem volt megfelelő."
+    elif drift_status == "elevated":
+        reason = "A holdout jellemzőeloszlása túl messze került a tanítási időszaktól."
     else:
         reason = "A holdout egyik eseményosztályából még túl kevés minta áll rendelkezésre."
 
@@ -989,6 +1122,9 @@ def train_probability_model(
         historical_mean_skill_pct=round(historical_mean_skill, 2),
         historical_positive_checks=historical_positive_checks,
         historical_total_checks=len(historical_states),
+        drift_score=drift_score,
+        drift_status=drift_status,
+        drift_features=drift_features,
         reliability_bins=reliability_bins(holdout_actual, holdout_probabilities),
         top_features=_permutation_importance(
             evaluation_estimator,
@@ -1037,6 +1173,7 @@ def _cached_live_state(
     closed_values: tuple[float, ...],
     closed_volumes: tuple[float | None, ...],
     closed_market_values: tuple[float, ...],
+    closed_funding_rates: tuple[float | None, ...],
     horizon_days: int,
 ) -> ProbabilityState:
     values = list(closed_values)
@@ -1045,6 +1182,7 @@ def _cached_live_state(
         list(closed_volumes),
         list(closed_market_values),
         horizon_days,
+        list(closed_funding_rates),
     )
     return train_probability_model(
         prepared,
@@ -1075,12 +1213,16 @@ def build_probability_forecast(
     lower_change_pct: float,
     upper_change_pct: float,
     market_context_available: bool,
+    funding_rates: list[float | None] | None = None,
 ) -> dict[str, Any]:
     spec = PROBABILITY_REGISTRY[horizon_days]
     aligned_market = _aligned_series(market_values, values)
     aligned_volumes = list(volumes[: len(values)])
     if len(aligned_volumes) < len(values):
         aligned_volumes.extend([None] * (len(values) - len(aligned_volumes)))
+    aligned_funding = list((funding_rates or [])[: len(values)])
+    if len(aligned_funding) < len(values):
+        aligned_funding.extend([None] * (len(values) - len(aligned_funding)))
 
     closed_values = tuple(float(value) for value in values[:-1])
     closed_volumes = tuple(
@@ -1088,10 +1230,15 @@ def build_probability_forecast(
         for value in aligned_volumes[:-1]
     )
     closed_market = tuple(float(value) for value in aligned_market[:-1])
+    closed_funding = tuple(
+        float(value) if value is not None else None
+        for value in aligned_funding[:-1]
+    )
     state = _cached_live_state(
         closed_values,
         closed_volumes,
         closed_market,
+        closed_funding,
         horizon_days,
     )
     if not state.training_samples:
@@ -1107,6 +1254,7 @@ def build_probability_forecast(
             values,
             aligned_volumes,
             aligned_market,
+            aligned_funding,
         )
     probability = probability_from_state(state, current_features)
 
@@ -1208,6 +1356,11 @@ def build_probability_forecast(
             "historical_positive_checks": state.historical_positive_checks,
             "historical_total_checks": state.historical_total_checks,
         },
+        "distribution_shift": {
+            "status": state.drift_status,
+            "score": state.drift_score,
+            "top_features": state.drift_features,
+        },
         "filters": {
             "trend_passed": trend_passed,
             "risk_passed": risk_passed,
@@ -1238,6 +1391,13 @@ def probability_registry_payload() -> list[dict[str, Any]]:
             "target_return_pct": spec.target_return_pct,
             "minimum_samples": spec.min_samples,
             "refit_days": spec.refit_days,
+            "candidates": [
+                {
+                    "key": candidate,
+                    "family": _candidate_family(candidate),
+                }
+                for candidate in HORIZON_CANDIDATES[horizon]
+            ],
         }
         for horizon, spec in PROBABILITY_REGISTRY.items()
     ]

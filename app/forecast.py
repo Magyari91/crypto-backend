@@ -7,7 +7,7 @@ from app.probability_models import build_probability_forecast
 from app.specialist_models import build_specialist_estimate
 
 MODEL_NAME = "Kalibrált horizont-specialista ensemble"
-MODEL_VERSION = "4.0.0"
+MODEL_VERSION = "5.0.0"
 DIRECTION_THRESHOLDS = {1: 0.20, 7: 0.75, 30: 1.50}
 MINIMUM_FEATURE_DAYS = 50
 MAX_CALIBRATION_SAMPLES = 60
@@ -590,6 +590,7 @@ def build_forecast(
     current_price: float | None = None,
     volumes: list[list[float]] | None = None,
     market_prices: list[list[float]] | None = None,
+    funding_rates: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     if horizon_days not in HORIZON_CONFIG:
         raise ValueError("Az időtáv 1, 7 vagy 30 nap lehet.")
@@ -603,6 +604,11 @@ def build_forecast(
     volume_by_day = daily_value_map(volumes or [])
     volume_values: list[float | None] = [
         volume_by_day.get(_parse_point_day(point["timestamp"]))
+        for point in points
+    ]
+    funding_by_day = daily_value_map(funding_rates or [])
+    funding_values: list[float | None] = [
+        funding_by_day.get(_parse_point_day(point["timestamp"]))
         for point in points
     ]
     market_by_day = daily_value_map(market_prices or prices)
@@ -644,6 +650,7 @@ def build_forecast(
         lower_change,
         upper_change,
         market_context_available,
+        funding_rates=funding_values,
     )
 
     recent_prices = values[-20:]
@@ -674,6 +681,15 @@ def build_forecast(
         f"A rövid távú forgalom a 30 napos átlag {snapshot['volume_ratio']:.2f}-szerese"
         if snapshot["volume_ratio"] is not None
         else "A forgalmi megerősítéshez nincs elegendő adat"
+    )
+    latest_funding = next(
+        (value for value in reversed(funding_values) if value is not None),
+        None,
+    )
+    funding_signal = (
+        f"A legutóbbi napi funding átlag {latest_funding:+.4f}%"
+        if latest_funding is not None
+        else "A futures funding jellemző még nem érhető el"
     )
 
     probability_signal = (
@@ -714,7 +730,7 @@ def build_forecast(
             "label": snapshot["regime_label"],
             "trend_strength": round(snapshot["trend_strength"], 2),
         },
-        "model": f"{MODEL_NAME} v4",
+        "model": f"{MODEL_NAME} v5",
         "model_version": MODEL_VERSION,
         "ensemble": {
             "weights": {
@@ -745,6 +761,7 @@ def build_forecast(
             specialist_signal,
             validation_signal,
             volume_signal,
+            funding_signal,
         ],
         "indicators": {
             "rsi": _clean_number(snapshot["rsi"], 1),
@@ -754,6 +771,7 @@ def build_forecast(
             "macd": _clean_number(snapshot["macd_histogram"], 8),
             "momentum_pct": _clean_number(snapshot["momentum_pct"], 2),
             "volume_ratio": _clean_number(snapshot["volume_ratio"], 2),
+            "funding_rate_pct": _clean_number(latest_funding, 6),
         },
         "series": chart_points,
     }

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -6,6 +7,7 @@ import httpx2
 
 from app.cache import AsyncTTLCache
 from app.config import settings
+from app.derivatives import normalize_derivatives
 from app.news import MAX_FEED_BYTES, merge_articles, parse_rss_feed
 
 
@@ -19,6 +21,7 @@ class MarketDataService:
     COINGECKO_URL = "https://api.coingecko.com/api/v3"
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     BINANCE_MARKET_URL = "https://data-api.binance.vision/api/v3"
+    BINANCE_FUTURES_URL = "https://fapi.binance.com"
     FEAR_GREED_URL = "https://api.alternative.me/fng/"
     RSS_NEWS_FEEDS = (
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
@@ -265,6 +268,102 @@ class MarketDataService:
             "interval": "1h",
         }
 
+    async def _binance_funding_history(
+        self,
+        symbol: str,
+        days: int,
+    ) -> list[dict[str, Any]]:
+        requested_days = min(max(days, 30), 2000)
+        now = datetime.now(timezone.utc)
+        cursor = int((now - timedelta(days=requested_days)).timestamp() * 1000)
+        end_time = int(now.timestamp() * 1000)
+        rows_by_timestamp: dict[int, dict[str, Any]] = {}
+
+        while cursor <= end_time and len(rows_by_timestamp) < requested_days * 4:
+            rows = await self._get_json(
+                "Binance Futures",
+                f"{self.BINANCE_FUTURES_URL}/fapi/v1/fundingRate",
+                {
+                    "symbol": f"{symbol}USDT",
+                    "startTime": cursor,
+                    "endTime": end_time,
+                    "limit": 1000,
+                },
+                settings.chart_cache_seconds,
+            )
+            if not isinstance(rows, list) or not rows:
+                break
+            valid_rows = [
+                row
+                for row in rows
+                if isinstance(row, dict) and row.get("fundingTime") is not None
+            ]
+            if not valid_rows:
+                break
+            for row in valid_rows:
+                rows_by_timestamp[int(row["fundingTime"])] = row
+            next_cursor = max(int(row["fundingTime"]) for row in valid_rows) + 1
+            if next_cursor <= cursor or len(valid_rows) < 1000:
+                break
+            cursor = next_cursor
+
+        return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)]
+
+    async def _binance_derivatives_history(
+        self,
+        symbol: str,
+        days: int,
+    ) -> dict[str, Any]:
+        pair = f"{symbol}USDT"
+        funding_task = self._binance_funding_history(symbol, days)
+        open_interest_task = self._get_json(
+            "Binance Futures",
+            f"{self.BINANCE_FUTURES_URL}/futures/data/openInterestHist",
+            {"symbol": pair, "period": "1d", "limit": 30},
+            settings.chart_cache_seconds,
+        )
+        long_short_task = self._get_json(
+            "Binance Futures",
+            f"{self.BINANCE_FUTURES_URL}/futures/data/globalLongShortAccountRatio",
+            {"symbol": pair, "period": "1d", "limit": 30},
+            settings.chart_cache_seconds,
+        )
+        taker_task = self._get_json(
+            "Binance Futures",
+            f"{self.BINANCE_FUTURES_URL}/futures/data/takerlongshortRatio",
+            {"symbol": pair, "period": "1d", "limit": 30},
+            settings.chart_cache_seconds,
+        )
+        funding, open_interest, long_short, taker = await asyncio.gather(
+            funding_task,
+            open_interest_task,
+            long_short_task,
+            taker_task,
+            return_exceptions=True,
+        )
+
+        def rows(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+            return []
+
+        normalized = normalize_derivatives(
+            funding_rows=rows(funding),
+            open_interest_rows=rows(open_interest),
+            long_short_rows=rows(long_short),
+            taker_rows=rows(taker),
+        )
+        if not normalized["snapshot"]["available"]:
+            failures = [
+                str(value)
+                for value in (funding, open_interest, long_short, taker)
+                if isinstance(value, Exception)
+            ]
+            if failures:
+                normalized["snapshot"]["status"] = "unavailable"
+                normalized["snapshot"]["reason"] = "A futures adatforrás átmenetileg nem érhető el."
+        return normalized
+
     async def _cryptocompare_history(
         self,
         symbol: str,
@@ -318,11 +417,35 @@ class MarketDataService:
             raise UpstreamServiceError("Forecast history", "Unsupported forecast symbol")
 
         try:
-            return await self._binance_history(symbol, days)
+            history, derivatives = await asyncio.gather(
+                self._binance_history(symbol, days),
+                self._binance_derivatives_history(symbol, days),
+                return_exceptions=True,
+            )
+            if isinstance(history, Exception):
+                raise history
+            if isinstance(derivatives, Exception):
+                derivatives = normalize_derivatives()
+                derivatives["snapshot"]["status"] = "unavailable"
+                derivatives["snapshot"]["reason"] = (
+                    "A futures adatforrás átmenetileg nem érhető el."
+                )
+            return {
+                **history,
+                "funding_rates": derivatives.get("funding_rates", []),
+                "derivatives": derivatives.get("snapshot", {}),
+            }
         except UpstreamServiceError:
             if settings.cryptocompare_api_key:
                 return await self._cryptocompare_history(symbol, days)
             raise
+
+    async def derivatives_snapshot(self, coin: str) -> dict[str, Any]:
+        symbol = self.FORECAST_SYMBOLS.get(coin)
+        if symbol is None:
+            raise UpstreamServiceError("Binance Futures", "Unsupported forecast symbol")
+        payload = await self._binance_derivatives_history(symbol, days=2000)
+        return payload["snapshot"]
 
     async def forecast_intraday_history(
         self,

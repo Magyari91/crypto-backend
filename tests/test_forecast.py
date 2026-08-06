@@ -24,7 +24,7 @@ def test_forecast_contract_for_rising_market():
     assert len(forecast["series"]) == 60
     assert forecast["indicators"]["rsi"] is not None
     assert forecast["base_price"] > 0
-    assert forecast["model_version"] == "4.0.0"
+    assert forecast["model_version"] == "5.0.0"
     assert forecast["regime"]["key"] == "trend"
     assert forecast["prediction_interval"]["lower_price"] <= forecast["target_price"]
     assert forecast["prediction_interval"]["upper_price"] >= forecast["target_price"]

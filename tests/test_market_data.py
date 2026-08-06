@@ -79,3 +79,50 @@ def test_binance_intraday_history_returns_hourly_ohlcv():
     assert history["candles"][0]["open"] == 100.0
     assert history["candles"][-1]["volume"] == 1000.0
     assert [call["limit"] for call in service.calls] == [1000, 1000, 200]
+
+
+class BinanceDerivativesService(MarketDataService):
+    def __init__(self):
+        self.calls = []
+
+    async def _get_json(self, service, url, params, cache_seconds, headers=None):
+        self.calls.append((url, params))
+        if url.endswith("/fapi/v1/fundingRate"):
+            start = params["startTime"] - params["startTime"] % 86_400_000
+            return [
+                {"fundingTime": start + 3_600_000, "fundingRate": "0.0001"},
+                {"fundingTime": start + 28_800_000, "fundingRate": "0.0002"},
+            ]
+        if url.endswith("/openInterestHist"):
+            return [
+                {"timestamp": 1_700_000_000_000, "sumOpenInterestValue": "1000000"}
+            ]
+        if url.endswith("/globalLongShortAccountRatio"):
+            return [
+                {
+                    "timestamp": 1_700_000_000_000,
+                    "longShortRatio": "1.2",
+                    "longAccount": "0.5455",
+                    "shortAccount": "0.4545",
+                }
+            ]
+        return [
+            {
+                "timestamp": 1_700_000_000_000,
+                "buySellRatio": "1.1",
+                "buyVol": "110",
+                "sellVol": "100",
+            }
+        ]
+
+
+def test_binance_derivatives_history_combines_public_futures_series():
+    service = BinanceDerivativesService()
+
+    payload = asyncio.run(service._binance_derivatives_history("BTC", 365))
+
+    assert payload["snapshot"]["available"] is True
+    assert payload["snapshot"]["funding_rate_pct"] == 0.015
+    assert payload["snapshot"]["open_interest_usd"] == 1_000_000.0
+    assert payload["snapshot"]["long_short_ratio"] == 1.2
+    assert len(service.calls) == 4

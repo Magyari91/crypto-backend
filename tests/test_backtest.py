@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from math import pi, sin
 
 from app.backtest import evaluate_journal, walk_forward_backtest
 
@@ -80,3 +81,26 @@ def test_journal_evaluation_marks_completed_and_pending_records():
     assert evaluated[0]["actual_price"] is not None
     assert evaluated[1]["status"] == "pending"
     assert evaluated[1]["actual_price"] is None
+
+
+def test_backtest_reports_reserved_challenger_metrics():
+    start = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    price = 100.0
+    prices = []
+    for offset in range(760):
+        price *= 1 + 0.001 + sin(2 * pi * offset / 36) * 0.008
+        timestamp = int((start + timedelta(days=offset)).timestamp() * 1000)
+        prices.append([timestamp, price])
+
+    result = walk_forward_backtest(
+        prices,
+        horizon_days=7,
+        max_samples=12,
+        minimum_refit_days=60,
+    )
+    challenger = result["summary"]["probability"]["challenger"]
+
+    assert challenger is not None
+    assert challenger["samples"] == 12
+    assert 0 <= challenger["brier_score"] <= 1
+    assert challenger["model_usage"]

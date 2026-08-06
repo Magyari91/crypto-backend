@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import datetime, timezone
 from math import sqrt
 from statistics import mean
@@ -82,6 +83,8 @@ def walk_forward_backtest(
     volumes: list[list[float]] | None = None,
     max_samples: int = MAX_BACKTEST_SAMPLES,
     market_prices: list[list[float]] | None = None,
+    funding_rates: list[list[float]] | None = None,
+    minimum_refit_days: int | None = None,
 ) -> dict[str, Any]:
     if horizon_days not in {1, 7, 30}:
         raise ValueError("Az időtáv 1, 7 vagy 30 nap lehet.")
@@ -97,6 +100,11 @@ def walk_forward_backtest(
     volume_by_day = daily_value_map(volumes or [])
     volume_values = [
         volume_by_day.get(_parse_timestamp(point["timestamp"]).date().isoformat())
+        for point in points
+    ]
+    funding_by_day = daily_value_map(funding_rates or [])
+    funding_values = [
+        funding_by_day.get(_parse_timestamp(point["timestamp"]).date().isoformat())
         for point in points
     ]
     market_by_day = daily_value_map(market_prices or prices)
@@ -134,13 +142,20 @@ def walk_forward_backtest(
         volume_values,
         market_values,
         horizon_days,
+        funding_values,
     )
     specialist_state = None
     specialist_last_refit = None
-    specialist_refit_days = SPECIALIST_REGISTRY[horizon_days].refit_days
+    specialist_refit_days = max(
+        SPECIALIST_REGISTRY[horizon_days].refit_days,
+        minimum_refit_days or 0,
+    )
     probability_state = None
     probability_last_refit = None
-    probability_refit_days = PROBABILITY_REGISTRY[horizon_days].refit_days
+    probability_refit_days = max(
+        PROBABILITY_REGISTRY[horizon_days].refit_days,
+        minimum_refit_days or 0,
+    )
     results = []
 
     for anchor in range(first_anchor, last_anchor + 1):
@@ -226,6 +241,7 @@ def walk_forward_backtest(
                     2,
                 ),
                 "probability_model_active": probability_state.active,
+                "probability_candidate_key": probability_state.candidate_key,
                 "buy_probability_threshold_pct": round(
                     probability_state.buy_threshold * 100,
                     2,
@@ -293,6 +309,52 @@ def walk_forward_backtest(
     active_probability_results = [
         item for item in results if item["probability_model_active"]
     ]
+    candidate_results = [
+        item for item in results if item["candidate_probability_pct"] is not None
+    ]
+    challenger = None
+    if candidate_results:
+        candidate_actual = [int(item["event_happened"]) for item in candidate_results]
+        candidate_probabilities = [
+            item["candidate_probability_pct"] / 100 for item in candidate_results
+        ]
+        candidate_baselines = [
+            item["baseline_probability_pct"] / 100 for item in candidate_results
+        ]
+        candidate_score = brier_score(candidate_actual, candidate_probabilities)
+        candidate_baseline_score = mean(
+            (probability - target) ** 2
+            for target, probability in zip(candidate_actual, candidate_baselines)
+        )
+        candidate_skill = (
+            (candidate_baseline_score - candidate_score)
+            / candidate_baseline_score
+            * 100
+            if candidate_baseline_score > 0
+            else 0.0
+        )
+        candidate_auc = safe_roc_auc(candidate_actual, candidate_probabilities)
+        model_counts = Counter(
+            item["probability_candidate_key"]
+            for item in candidate_results
+            if item["probability_candidate_key"]
+        )
+        challenger = {
+            "samples": len(candidate_results),
+            "brier_score": round(candidate_score, 4),
+            "baseline_brier_score": round(candidate_baseline_score, 4),
+            "brier_skill_pct": round(candidate_skill, 2),
+            "log_loss": round(
+                binary_log_loss(candidate_actual, candidate_probabilities),
+                4,
+            ),
+            "roc_auc": round(candidate_auc, 4) if candidate_auc is not None else None,
+            "calibration_error_pct": round(
+                calibration_error(candidate_actual, candidate_probabilities) * 100,
+                2,
+            ),
+            "model_usage": dict(model_counts),
+        }
 
     return {
         "model": {
@@ -351,6 +413,7 @@ def walk_forward_backtest(
                     len(active_probability_results) / len(results) * 100,
                     2,
                 ),
+                "challenger": challenger,
                 "reliability_bins": reliability_bins(
                     event_actual,
                     event_probabilities,

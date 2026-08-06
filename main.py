@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from app.async_jobs import AsyncJobCache
 from app.backtest import evaluate_journal, walk_forward_backtest
 from app.cache import AsyncTTLCache
 from app.config import settings
@@ -21,6 +22,8 @@ from app.forecast import DIRECTION_THRESHOLDS, MODEL_VERSION
 from app.forecast_store import ForecastStore
 from app.market_data import MarketDataService, UpstreamServiceError
 from app.model_lab import build_model_lab
+from app.probability_models import probability_registry_payload
+from app.specialist_models import specialist_registry_payload
 
 
 @asynccontextmanager
@@ -32,6 +35,7 @@ async def lifespan(app: FastAPI):
     app.state.market_data = service
     app.state.forecast_store = forecast_store
     app.state.analytics_cache = AsyncTTLCache(settings.stale_cache_seconds)
+    app.state.analytics_jobs = AsyncJobCache()
     try:
         yield
     finally:
@@ -76,13 +80,39 @@ def journal_store(request: Request) -> ForecastStore:
 
 async def record_dashboard_forecast(request: Request, payload: dict) -> None:
     selected = payload["selected"]
-    await asyncio.to_thread(
-        journal_store(request).record,
-        selected["id"],
-        selected["symbol"],
-        payload["generated_at"],
-        selected["forecast"],
-    )
+    forecast = selected["forecast"]
+    store = journal_store(request)
+
+    def persist() -> None:
+        store.record(
+            selected["id"],
+            selected["symbol"],
+            payload["generated_at"],
+            forecast,
+        )
+        store.record_feature_snapshot(
+            coin_id=selected["id"],
+            symbol=selected["symbol"],
+            generated_at=payload["generated_at"],
+            horizon_days=int(forecast["horizon_days"]),
+            market={
+                **payload.get("market", {}),
+                "current_price": selected.get("current_price"),
+                "change_24h": selected.get("change_24h"),
+                "change_7d": selected.get("change_7d"),
+            },
+            technical=forecast.get("indicators", {}),
+            derivatives=payload.get("derivatives", {}),
+            news_sentiment=payload.get("news_sentiment", {}),
+            model={
+                "model": forecast.get("model"),
+                "model_version": forecast.get("model_version"),
+                "specialist": forecast.get("specialist", {}),
+                "probability": forecast.get("probability_forecast", {}),
+            },
+        )
+
+    await asyncio.to_thread(persist)
 
 
 def validate_coin(coin: str) -> str:
@@ -199,10 +229,12 @@ async def forecast_analytics(
     last_point = prices[-1] if prices else [0, 0]
     benchmark_prices = benchmark_chart.get("prices", [])
     benchmark_last_point = benchmark_prices[-1] if benchmark_prices else [0, 0]
+    funding_rates = chart.get("funding_rates", [])
+    funding_last_point = funding_rates[-1] if funding_rates else [0, 0]
     backtest_cache_key = (
         f"{selected_coin}:{horizon}:{len(prices)}:{last_point[0]}:"
         f"{last_point[1]}:{benchmark_last_point[0]}:{benchmark_last_point[1]}:"
-        f"{MODEL_VERSION}"
+        f"{funding_last_point[0]}:{funding_last_point[1]}:{MODEL_VERSION}"
     )
 
     async def calculate_backtest():
@@ -211,30 +243,57 @@ async def forecast_analytics(
             prices,
             horizon,
             chart.get("total_volumes", []),
+            max_samples=60,
             market_prices=benchmark_chart.get("prices", []),
+            funding_rates=funding_rates,
+            minimum_refit_days=60,
         )
 
     try:
-        backtest, evaluated_history = await asyncio.gather(
-            request.app.state.analytics_cache.get_or_set(
+        job_status, evaluated_history = await asyncio.gather(
+            request.app.state.analytics_jobs.get_or_start(
                 backtest_cache_key,
                 settings.chart_cache_seconds,
                 calculate_backtest,
             ),
             asyncio.to_thread(evaluate_journal, history, prices),
         )
+        if job_status.state == "pending":
+            job_status = await request.app.state.analytics_jobs.wait(
+                backtest_cache_key,
+                settings.chart_cache_seconds,
+                timeout_seconds=2.0,
+            )
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-    response.headers["Cache-Control"] = "no-store"
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+    generated_at = datetime.now(timezone.utc).isoformat()
+    common_payload = {
+        "generated_at": generated_at,
         "asset": {"id": selected_coin, **SUPPORTED_COINS[selected_coin]},
         "horizon_days": horizon,
-        "backtest": backtest,
         "history": evaluated_history,
         "history_bucket_minutes": 15,
         "disclaimer": "A múltbeli eredmény nem garantálja a jövőbeli teljesítményt.",
+    }
+    if job_status.state != "ready":
+        return JSONResponse(
+            status_code=202,
+            headers={"Cache-Control": "no-store", "Retry-After": "5"},
+            content={
+                **common_payload,
+                "status": "pending",
+                "retry_after_seconds": 5,
+                "analysis_profile": "60 lezárt időpont, legfeljebb 60 napos újratanítás",
+            },
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        **common_payload,
+        "status": "ready",
+        "analysis_profile": "60 lezárt időpont, legfeljebb 60 napos újratanítás",
+        "backtest": job_status.value,
     }
 
 
@@ -298,6 +357,56 @@ async def forecast_model_lab(
 async def markets(request: Request, limit: int = Query(default=20, ge=5, le=50)):
     data = await market_service(request).markets(per_page=limit, sparkline=True)
     return data
+
+
+@app.get("/api/v1/forecast/registry")
+async def forecast_registry(
+    request: Request,
+    coin: str = Query(default="bitcoin"),
+    horizon: int = Query(default=7),
+):
+    try:
+        selected_coin = validate_coin(coin)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    if horizon not in {1, 7, 30}:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Az időtáv 1, 7 vagy 30 nap lehet."},
+        )
+
+    feature_store = await asyncio.to_thread(
+        journal_store(request).feature_status,
+        selected_coin,
+        horizon,
+    )
+    return {
+        "model_version": MODEL_VERSION,
+        "asset": {"id": selected_coin, **SUPPORTED_COINS[selected_coin]},
+        "horizon_days": horizon,
+        "probability_models": probability_registry_payload(),
+        "specialist_models": specialist_registry_payload(),
+        "feature_store": feature_store,
+        "activation_policy": (
+            "A challenger csak pozitív validációs és érintetlen holdout-előny, "
+            "stabil idősávok, elfogadható kalibráció és alacsony eloszláseltolódás "
+            "mellett válhat aktívvá."
+        ),
+    }
+
+
+@app.get("/api/v1/derivatives")
+async def derivatives(
+    request: Request,
+    response: Response,
+    coin: str = Query(default="bitcoin"),
+):
+    try:
+        selected_coin = validate_coin(coin)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    response.headers["Cache-Control"] = "public, max-age=60, stale-while-revalidate=300"
+    return await market_service(request).derivatives_snapshot(selected_coin)
 
 
 @app.get("/api/v1/news")

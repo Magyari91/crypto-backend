@@ -6,6 +6,7 @@ from typing import Any
 
 
 JOURNAL_BUCKET_MINUTES = 15
+FEATURE_SNAPSHOT_VERSION = "1.0.0"
 
 
 def _utc_datetime(value: str) -> datetime:
@@ -69,6 +70,31 @@ class ForecastStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_forecast_log_lookup
                 ON forecast_log (coin_id, horizon_days, generated_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feature_snapshot (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    coin_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    horizon_days INTEGER NOT NULL,
+                    feature_version TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    bucket_start TEXT NOT NULL,
+                    market_json TEXT NOT NULL,
+                    technical_json TEXT NOT NULL,
+                    derivatives_json TEXT NOT NULL,
+                    news_sentiment_json TEXT NOT NULL,
+                    model_json TEXT NOT NULL,
+                    UNIQUE (coin_id, horizon_days, feature_version, bucket_start)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_feature_snapshot_lookup
+                ON feature_snapshot (coin_id, horizon_days, generated_at DESC)
                 """
             )
 
@@ -137,6 +163,97 @@ class ForecastStore:
                 ),
             )
             return cursor.rowcount == 1
+
+    def record_feature_snapshot(
+        self,
+        coin_id: str,
+        symbol: str,
+        generated_at: str,
+        horizon_days: int,
+        market: dict[str, Any],
+        technical: dict[str, Any],
+        derivatives: dict[str, Any],
+        news_sentiment: dict[str, Any],
+        model: dict[str, Any],
+    ) -> bool:
+        timestamp = _utc_datetime(generated_at)
+        bucket = timestamp.replace(
+            minute=(timestamp.minute // JOURNAL_BUCKET_MINUTES) * JOURNAL_BUCKET_MINUTES,
+            second=0,
+            microsecond=0,
+        )
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO feature_snapshot (
+                    coin_id,
+                    symbol,
+                    horizon_days,
+                    feature_version,
+                    generated_at,
+                    bucket_start,
+                    market_json,
+                    technical_json,
+                    derivatives_json,
+                    news_sentiment_json,
+                    model_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    coin_id,
+                    symbol,
+                    int(horizon_days),
+                    FEATURE_SNAPSHOT_VERSION,
+                    timestamp.isoformat(),
+                    bucket.isoformat(),
+                    json.dumps(market, ensure_ascii=False),
+                    json.dumps(technical, ensure_ascii=False),
+                    json.dumps(derivatives, ensure_ascii=False),
+                    json.dumps(news_sentiment, ensure_ascii=False),
+                    json.dumps(model, ensure_ascii=False),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def feature_status(self, coin_id: str, horizon_days: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            summary = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS sample_count,
+                    MIN(generated_at) AS first_generated_at,
+                    MAX(generated_at) AS last_generated_at
+                FROM feature_snapshot
+                WHERE coin_id = ? AND horizon_days = ?
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchone()
+            latest = connection.execute(
+                """
+                SELECT feature_version, derivatives_json, news_sentiment_json, model_json
+                FROM feature_snapshot
+                WHERE coin_id = ? AND horizon_days = ?
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchone()
+
+        return {
+            "feature_version": (
+                latest["feature_version"] if latest else FEATURE_SNAPSHOT_VERSION
+            ),
+            "sample_count": int(summary["sample_count"] if summary else 0),
+            "first_generated_at": summary["first_generated_at"] if summary else None,
+            "last_generated_at": summary["last_generated_at"] if summary else None,
+            "latest_derivatives": (
+                json.loads(latest["derivatives_json"]) if latest else None
+            ),
+            "latest_news_sentiment": (
+                json.loads(latest["news_sentiment_json"]) if latest else None
+            ),
+            "latest_model": json.loads(latest["model_json"]) if latest else None,
+        }
 
     def recent(self, coin_id: str, horizon_days: int, limit: int = 12) -> list[dict[str, Any]]:
         with self._connect() as connection:
