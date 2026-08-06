@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.dashboard import build_dashboard
+from app.market_data import UpstreamServiceError
 
 
 def synthetic_prices(days: int = 120):
@@ -91,3 +92,39 @@ def test_dashboard_contract():
     assert payload["derivatives"]["available"] is False
     assert payload["news_sentiment"]["sample_size"] == 1
     assert "distribution_shift" in payload["selected"]["forecast"]["probability_forecast"]
+
+
+class CoinGeckoUnavailableService(FakeMarketDataService):
+    async def global_market(self):
+        raise UpstreamServiceError("CoinGecko", "rate limited")
+
+    async def markets(self, per_page=30, sparkline=True):
+        raise UpstreamServiceError("CoinGecko", "rate limited")
+
+    async def supported_markets(self):
+        return [
+            {
+                "id": "bitcoin",
+                "symbol": "btc",
+                "name": "Bitcoin",
+                "current_price": "126.0",
+                "market_cap": None,
+                "market_cap_rank": None,
+                "price_change_percentage_24h": "2.1",
+                "price_change_percentage_7d_in_currency": None,
+                "high_24h": "128.0",
+                "low_24h": "121.0",
+                "sparkline_in_7d": {"price": []},
+            }
+        ]
+
+
+def test_dashboard_uses_binance_market_fallback_when_coingecko_is_unavailable():
+    payload = asyncio.run(build_dashboard(CoinGeckoUnavailableService(), "bitcoin", 7))
+
+    assert payload["market_data_source"] == "Binance Spot"
+    assert payload["market"]["overview_available"] is False
+    assert payload["market"]["total_market_cap"] is None
+    assert payload["selected"]["current_price"] == 126.0
+    assert payload["selected"]["change_7d"] > 0
+    assert len(payload["selected"]["sparkline"]) == 42

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -38,6 +39,13 @@ class MarketDataService:
         "solana": "SOL",
         "ripple": "XRP",
         "dogecoin": "DOGE",
+    }
+    FORECAST_NAMES = {
+        "bitcoin": "Bitcoin",
+        "ethereum": "Ethereum",
+        "solana": "Solana",
+        "ripple": "XRP",
+        "dogecoin": "Dogecoin",
     }
 
     def __init__(self):
@@ -141,6 +149,47 @@ class MarketDataService:
         if not isinstance(data, list):
             raise UpstreamServiceError("CoinGecko", "Unexpected markets response")
         return data
+
+    async def supported_markets(self) -> list[dict[str, Any]]:
+        pairs = [f"{symbol}USDT" for symbol in self.FORECAST_SYMBOLS.values()]
+        data = await self._get_json(
+            "Binance",
+            f"{self.BINANCE_MARKET_URL}/ticker/24hr",
+            {"symbols": json.dumps(pairs, separators=(",", ":"))},
+            settings.market_cache_seconds,
+        )
+        if not isinstance(data, list):
+            raise UpstreamServiceError("Binance", "Unexpected ticker response")
+
+        tickers = {
+            str(item.get("symbol", "")).upper(): item
+            for item in data
+            if isinstance(item, dict)
+        }
+        markets = []
+        for coin_id, symbol in self.FORECAST_SYMBOLS.items():
+            ticker = tickers.get(f"{symbol}USDT")
+            if ticker is None:
+                continue
+            markets.append(
+                {
+                    "id": coin_id,
+                    "symbol": symbol.lower(),
+                    "name": self.FORECAST_NAMES[coin_id],
+                    "image": None,
+                    "current_price": ticker.get("lastPrice"),
+                    "market_cap": None,
+                    "market_cap_rank": None,
+                    "price_change_percentage_24h": ticker.get("priceChangePercent"),
+                    "price_change_percentage_7d_in_currency": None,
+                    "high_24h": ticker.get("highPrice"),
+                    "low_24h": ticker.get("lowPrice"),
+                    "sparkline_in_7d": {"price": []},
+                }
+            )
+        if not markets:
+            raise UpstreamServiceError("Binance", "No supported ticker data")
+        return markets
 
     async def market_chart(self, coin: str, days: int = 120) -> dict[str, Any]:
         return await self._get_json(

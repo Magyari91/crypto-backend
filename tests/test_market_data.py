@@ -126,3 +126,38 @@ def test_binance_derivatives_history_combines_public_futures_series():
     assert payload["snapshot"]["open_interest_usd"] == 1_000_000.0
     assert payload["snapshot"]["long_short_ratio"] == 1.2
     assert len(service.calls) == 4
+
+
+class BinanceMarketsService(MarketDataService):
+    def __init__(self):
+        self.params = None
+
+    async def _get_json(self, service, url, params, cache_seconds, headers=None):
+        self.params = params
+        return [
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "64500.5",
+                "priceChangePercent": "2.4",
+                "highPrice": "65000",
+                "lowPrice": "62000",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "lastPrice": "3500",
+                "priceChangePercent": "-1.2",
+                "highPrice": "3600",
+                "lowPrice": "3400",
+            },
+        ]
+
+
+def test_supported_markets_normalizes_binance_tickers():
+    service = BinanceMarketsService()
+
+    markets = asyncio.run(service.supported_markets())
+
+    assert [market["id"] for market in markets] == ["bitcoin", "ethereum"]
+    assert markets[0]["current_price"] == "64500.5"
+    assert markets[1]["price_change_percentage_24h"] == "-1.2"
+    assert "BTCUSDT" in service.params["symbols"]

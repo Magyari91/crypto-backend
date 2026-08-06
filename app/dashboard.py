@@ -24,6 +24,15 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _optional_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
     sparkline = coin.get("sparkline_in_7d", {}).get("price", [])
     return {
@@ -32,14 +41,36 @@ def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
         "name": coin.get("name"),
         "image": coin.get("image"),
         "current_price": _number(coin.get("current_price")),
-        "market_cap": _number(coin.get("market_cap")),
+        "market_cap": _optional_number(coin.get("market_cap")),
         "market_cap_rank": coin.get("market_cap_rank"),
-        "change_24h": _number(coin.get("price_change_percentage_24h")),
-        "change_7d": _number(coin.get("price_change_percentage_7d_in_currency")),
-        "high_24h": _number(coin.get("high_24h")),
-        "low_24h": _number(coin.get("low_24h")),
+        "change_24h": _optional_number(coin.get("price_change_percentage_24h")),
+        "change_7d": _optional_number(coin.get("price_change_percentage_7d_in_currency")),
+        "high_24h": _optional_number(coin.get("high_24h")),
+        "low_24h": _optional_number(coin.get("low_24h")),
         "sparkline": [round(_number(price), 8) for price in sparkline[-42:]],
     }
+
+
+def _enrich_market_from_chart(
+    coin: dict[str, Any],
+    chart: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(coin)
+    prices = chart.get("prices", [])
+    closes = [_optional_number(point[1]) for point in prices if len(point) >= 2]
+    closes = [price for price in closes if price is not None]
+    if not closes:
+        return enriched
+
+    enriched["current_price"] = enriched.get("current_price") or closes[-1]
+    if enriched.get("price_change_percentage_24h") is None and len(closes) >= 2:
+        enriched["price_change_percentage_24h"] = (closes[-1] / closes[-2] - 1) * 100
+    if enriched.get("price_change_percentage_7d_in_currency") is None and len(closes) >= 8:
+        enriched["price_change_percentage_7d_in_currency"] = (
+            closes[-1] / closes[-8] - 1
+        ) * 100
+    enriched["sparkline_in_7d"] = {"price": closes[-42:]}
+    return enriched
 
 
 def normalize_news(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -86,8 +117,8 @@ async def build_dashboard(
     horizon_days: int,
     include_news: bool = True,
 ) -> dict[str, Any]:
-    global_task = service.global_market()
-    markets_task = service.markets(per_page=30, sparkline=True)
+    global_task = _optional(service.global_market(), {"data": {}})
+    markets_task = _optional(service.markets(per_page=30, sparkline=True), [])
     chart_task = load_forecast_history(service, selected_coin)
     benchmark_task = (
         asyncio.sleep(0, result=None)
@@ -107,10 +138,24 @@ async def build_dashboard(
     )
     benchmark_chart = chart if benchmark_chart is None else benchmark_chart
 
+    market_data_source = "CoinGecko"
+    if not markets:
+        fallback_loader = getattr(service, "supported_markets", None)
+        if callable(fallback_loader):
+            markets = await _optional(fallback_loader(), [])
+        market_data_source = "Binance Spot"
+
     global_data = global_response.get("data", {})
     selected_raw = next((coin for coin in markets if coin.get("id") == selected_coin), None)
     if selected_raw is None:
-        raise ValueError("A kiválasztott eszköz nem található a piaci listában")
+        selected_raw = {"id": selected_coin, **SUPPORTED_COINS[selected_coin]}
+        market_data_source = chart.get("source", market_data_source)
+    if market_data_source != "CoinGecko":
+        selected_raw = _enrich_market_from_chart(selected_raw, chart)
+        markets = [
+            selected_raw if coin.get("id") == selected_coin else coin
+            for coin in markets
+        ] or [selected_raw]
 
     selected = _market_row(selected_raw)
     selected["forecast"] = await asyncio.to_thread(
@@ -136,14 +181,16 @@ async def build_dashboard(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "market": {
-            "total_market_cap": _number(global_data.get("total_market_cap", {}).get("usd")),
-            "total_volume_24h": _number(global_data.get("total_volume", {}).get("usd")),
-            "btc_dominance": _number(global_data.get("market_cap_percentage", {}).get("btc")),
-            "eth_dominance": _number(global_data.get("market_cap_percentage", {}).get("eth")),
-            "market_cap_change_24h": _number(global_data.get("market_cap_change_percentage_24h_usd")),
+            "overview_available": bool(global_data),
+            "total_market_cap": _optional_number(global_data.get("total_market_cap", {}).get("usd")),
+            "total_volume_24h": _optional_number(global_data.get("total_volume", {}).get("usd")),
+            "btc_dominance": _optional_number(global_data.get("market_cap_percentage", {}).get("btc")),
+            "eth_dominance": _optional_number(global_data.get("market_cap_percentage", {}).get("eth")),
+            "market_cap_change_24h": _optional_number(global_data.get("market_cap_change_percentage_24h_usd")),
             "active_cryptocurrencies": int(global_data.get("active_cryptocurrencies", 0)),
             "fear_greed": {"value": fear_value, "label": fear_label},
         },
+        "market_data_source": market_data_source,
         "derivatives": chart.get(
             "derivatives",
             {
