@@ -1,8 +1,4 @@
-fastapi
-fastapi
-uvicorn
-requests
-psycopg2-binary
-pandas
-ta
-apscheduler
+fastapi==0.139.0
+httpx2==2.5.0
+scikit-learn==1.9.0
+uvicorn==0.51.0

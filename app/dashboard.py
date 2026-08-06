@@ -1,0 +1,155 @@
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from app.forecast import build_forecast, calculate_indicators
+from app.market_data import MarketDataService, UpstreamServiceError
+from app.news import normalize_articles
+
+
+SUPPORTED_COINS = {
+    "bitcoin": {"symbol": "BTC", "name": "Bitcoin"},
+    "ethereum": {"symbol": "ETH", "name": "Ethereum"},
+    "solana": {"symbol": "SOL", "name": "Solana"},
+    "ripple": {"symbol": "XRP", "name": "XRP"},
+    "dogecoin": {"symbol": "DOGE", "name": "Dogecoin"},
+}
+FORECAST_HISTORY_DAYS = 2000
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
+    sparkline = coin.get("sparkline_in_7d", {}).get("price", [])
+    return {
+        "id": coin.get("id"),
+        "symbol": str(coin.get("symbol", "")).upper(),
+        "name": coin.get("name"),
+        "image": coin.get("image"),
+        "current_price": _number(coin.get("current_price")),
+        "market_cap": _number(coin.get("market_cap")),
+        "market_cap_rank": coin.get("market_cap_rank"),
+        "change_24h": _number(coin.get("price_change_percentage_24h")),
+        "change_7d": _number(coin.get("price_change_percentage_7d_in_currency")),
+        "high_24h": _number(coin.get("high_24h")),
+        "low_24h": _number(coin.get("low_24h")),
+        "sparkline": [round(_number(price), 8) for price in sparkline[-42:]],
+    }
+
+
+def normalize_news(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return normalize_articles(articles)
+
+
+def build_indicator_summary(prices: list[list[float]]) -> list[dict[str, Any]]:
+    latest = calculate_indicators(prices)
+    return [
+        {"name": "RSI (14)", "value": round(_number(latest["rsi"]), 1)},
+        {"name": "EMA (20)", "value": round(_number(latest["ema20"]), 6)},
+        {"name": "EMA (50)", "value": round(_number(latest["ema50"]), 6)},
+        {"name": "MACD", "value": round(_number(latest["macd_histogram"]), 6)},
+        {"name": "Bollinger felso", "value": round(_number(latest["bollinger_upper"]), 6)},
+        {"name": "Bollinger also", "value": round(_number(latest["bollinger_lower"]), 6)},
+    ]
+
+
+async def _optional(awaitable, fallback):
+    try:
+        return await awaitable
+    except Exception:
+        return fallback
+
+
+async def load_forecast_history(
+    service: MarketDataService,
+    coin: str,
+    days: int = FORECAST_HISTORY_DAYS,
+) -> dict[str, Any]:
+    history_loader = getattr(service, "forecast_history", None)
+    if callable(history_loader):
+        try:
+            return await history_loader(coin, days=days)
+        except UpstreamServiceError:
+            pass
+    chart = await service.market_chart(coin, days=min(days, 365))
+    return {**chart, "source": chart.get("source", "CoinGecko")}
+
+
+async def build_dashboard(
+    service: MarketDataService,
+    selected_coin: str,
+    horizon_days: int,
+    include_news: bool = True,
+) -> dict[str, Any]:
+    global_task = service.global_market()
+    markets_task = service.markets(per_page=30, sparkline=True)
+    chart_task = load_forecast_history(service, selected_coin)
+    benchmark_task = (
+        asyncio.sleep(0, result=None)
+        if selected_coin == "bitcoin"
+        else load_forecast_history(service, "bitcoin")
+    )
+    fear_task = _optional(service.fear_greed(), None)
+    news_task = _optional(service.news(), []) if include_news else asyncio.sleep(0, result=[])
+
+    global_response, markets, chart, benchmark_chart, fear_greed, articles = await asyncio.gather(
+        global_task,
+        markets_task,
+        chart_task,
+        benchmark_task,
+        fear_task,
+        news_task,
+    )
+    benchmark_chart = chart if benchmark_chart is None else benchmark_chart
+
+    global_data = global_response.get("data", {})
+    selected_raw = next((coin for coin in markets if coin.get("id") == selected_coin), None)
+    if selected_raw is None:
+        raise ValueError("A kiválasztott eszköz nem található a piaci listában")
+
+    selected = _market_row(selected_raw)
+    selected["forecast"] = build_forecast(
+        chart.get("prices", []),
+        horizon_days,
+        current_price=selected["current_price"],
+        volumes=chart.get("total_volumes", []),
+        market_prices=benchmark_chart.get("prices", []),
+    )
+    selected["forecast"]["data_source"] = chart.get("source", "CoinGecko")
+    selected["forecast"]["history_days"] = len(chart.get("prices", []))
+
+    market_rows = [_market_row(coin) for coin in markets]
+    valid_movers = [row for row in market_rows if row["change_24h"] is not None]
+    sorted_movers = sorted(valid_movers, key=lambda row: row["change_24h"], reverse=True)
+
+    fear_value = int(fear_greed.get("value", 0)) if fear_greed else None
+    fear_label = fear_greed.get("value_classification") if fear_greed else None
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "market": {
+            "total_market_cap": _number(global_data.get("total_market_cap", {}).get("usd")),
+            "total_volume_24h": _number(global_data.get("total_volume", {}).get("usd")),
+            "btc_dominance": _number(global_data.get("market_cap_percentage", {}).get("btc")),
+            "eth_dominance": _number(global_data.get("market_cap_percentage", {}).get("eth")),
+            "market_cap_change_24h": _number(global_data.get("market_cap_change_percentage_24h_usd")),
+            "active_cryptocurrencies": int(global_data.get("active_cryptocurrencies", 0)),
+            "fear_greed": {"value": fear_value, "label": fear_label},
+        },
+        "selected": selected,
+        "movers": {
+            "gainers": sorted_movers[:5],
+            "losers": list(reversed(sorted_movers[-5:])),
+        },
+        "watchlist": market_rows[:10],
+        "news": normalize_news(articles)[:6],
+        "supported_coins": [
+            {"id": coin_id, **metadata} for coin_id, metadata in SUPPORTED_COINS.items()
+        ],
+        "disclaimer": "Kísérleti technikai piaci jelzés, nem pénzügyi tanács.",
+    }

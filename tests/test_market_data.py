@@ -1,0 +1,81 @@
+import asyncio
+
+from app.market_data import MarketDataService
+
+
+class BinanceHistoryService(MarketDataService):
+    def __init__(self):
+        self.calls = []
+
+    async def _get_json(self, service, url, params, cache_seconds, headers=None):
+        self.calls.append(params)
+        if "endTime" not in params:
+            origins = range(95, 1095)
+        else:
+            origins = range(0, 95)
+        return [
+            [
+                origin * 86_400_000,
+                "100",
+                "105",
+                "95",
+                str(100 + origin / 100),
+                "10",
+                origin * 86_400_000 + 86_399_999,
+                "1000",
+            ]
+            for origin in origins
+        ]
+
+
+def test_binance_history_paginates_beyond_one_thousand_days():
+    service = BinanceHistoryService()
+
+    history = asyncio.run(service._binance_history("BTC", 1095))
+
+    assert len(history["prices"]) == 1095
+    assert len(history["total_volumes"]) == 1095
+    assert history["source"] == "Binance (USDT)"
+    assert len(service.calls) == 2
+    assert service.calls[0]["limit"] == 1000
+    assert service.calls[1]["limit"] == 95
+
+
+class BinanceIntradayService(MarketDataService):
+    def __init__(self):
+        self.calls = []
+
+    async def _get_json(self, service, url, params, cache_seconds, headers=None):
+        self.calls.append(params)
+        call_index = len(self.calls)
+        if call_index == 1:
+            origins = range(1200, 2200)
+        elif call_index == 2:
+            origins = range(200, 1200)
+        else:
+            origins = range(0, 200)
+        return [
+            [
+                origin * 3_600_000,
+                "100",
+                "102",
+                "99",
+                "101",
+                "10",
+                origin * 3_600_000 + 3_599_999,
+                "1000",
+            ]
+            for origin in origins
+        ]
+
+
+def test_binance_intraday_history_returns_hourly_ohlcv():
+    service = BinanceIntradayService()
+
+    history = asyncio.run(service._binance_intraday_history("BTC", 2200))
+
+    assert len(history["candles"]) == 2200
+    assert history["interval"] == "1h"
+    assert history["candles"][0]["open"] == 100.0
+    assert history["candles"][-1]["volume"] == 1000.0
+    assert [call["limit"] for call in service.calls] == [1000, 1000, 200]
