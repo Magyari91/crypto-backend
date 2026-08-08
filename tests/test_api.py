@@ -215,6 +215,12 @@ def test_snapshot_collector_persists_manual_target(tmp_path, monkeypatch):
     assert payload["scheduled"] is False
     assert payload["created"] == {"forecast": True, "feature_snapshot": True}
     assert payload["feature_store"]["sample_count"] == 1
+    assert set(payload["feature_store"]) == {
+        "feature_version",
+        "sample_count",
+        "first_generated_at",
+        "last_generated_at",
+    }
 
 
 def test_snapshot_collector_uses_scheduled_target(tmp_path, monkeypatch):
