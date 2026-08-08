@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: crypto-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: CORS_ORIGINS
+        sync: false
+      - key: CRYPTOCOMPARE_API_KEY
+        sync: false
+      - key: FORECAST_DB_PATH
+        sync: false
+      - key: FORECAST_DATABASE_URL
+        sync: false
+      - key: SNAPSHOT_TOKEN
+        sync: false
