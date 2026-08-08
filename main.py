@@ -223,6 +223,15 @@ async def collect_snapshot(
             selected_coin,
             selected_horizon,
         )
+        feature_summary = {
+            key: feature_store[key]
+            for key in (
+                "feature_version",
+                "sample_count",
+                "first_generated_at",
+                "last_generated_at",
+            )
+        }
 
     return {
         "status": "collected",
@@ -231,7 +240,7 @@ async def collect_snapshot(
         "target": {"coin": selected_coin, "horizon_days": selected_horizon},
         "created": created,
         "storage": journal_store(request).storage_status(),
-        "feature_store": feature_store,
+        "feature_store": feature_summary,
     }
 
 
