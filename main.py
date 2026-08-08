@@ -1,8 +1,17 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import secrets
 
-from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -23,19 +32,24 @@ from app.forecast_store import ForecastStore
 from app.market_data import MarketDataService, UpstreamServiceError
 from app.model_lab import build_model_lab
 from app.probability_models import probability_registry_payload
+from app.snapshot_schedule import scheduled_snapshot_target
 from app.specialist_models import specialist_registry_payload
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     service = MarketDataService()
-    forecast_store = ForecastStore(settings.forecast_db_path)
+    forecast_store = ForecastStore(
+        settings.forecast_db_path,
+        settings.forecast_database_url,
+    )
     await asyncio.to_thread(forecast_store.initialize)
     await service.start()
     app.state.market_data = service
     app.state.forecast_store = forecast_store
     app.state.analytics_cache = AsyncTTLCache(settings.stale_cache_seconds)
     app.state.analytics_jobs = AsyncJobCache()
+    app.state.snapshot_lock = asyncio.Lock()
     try:
         yield
     finally:
@@ -54,7 +68,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -78,19 +92,19 @@ def journal_store(request: Request) -> ForecastStore:
     return request.app.state.forecast_store
 
 
-async def record_dashboard_forecast(request: Request, payload: dict) -> None:
+async def record_dashboard_forecast(request: Request, payload: dict) -> dict[str, bool]:
     selected = payload["selected"]
     forecast = selected["forecast"]
     store = journal_store(request)
 
-    def persist() -> None:
-        store.record(
+    def persist() -> dict[str, bool]:
+        forecast_created = store.record(
             selected["id"],
             selected["symbol"],
             payload["generated_at"],
             forecast,
         )
-        store.record_feature_snapshot(
+        snapshot_created = store.record_feature_snapshot(
             coin_id=selected["id"],
             symbol=selected["symbol"],
             generated_at=payload["generated_at"],
@@ -111,8 +125,12 @@ async def record_dashboard_forecast(request: Request, payload: dict) -> None:
                 "probability": forecast.get("probability_forecast", {}),
             },
         )
+        return {
+            "forecast": forecast_created,
+            "feature_snapshot": snapshot_created,
+        }
 
-    await asyncio.to_thread(persist)
+    return await asyncio.to_thread(persist)
 
 
 def validate_coin(coin: str) -> str:
@@ -134,8 +152,87 @@ async def root():
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "version": MODEL_VERSION}
+async def health(request: Request):
+    return {
+        "status": "ok",
+        "version": MODEL_VERSION,
+        "storage": journal_store(request).storage_status(),
+    }
+
+
+@app.post("/api/v1/internal/snapshots/collect")
+async def collect_snapshot(
+    request: Request,
+    coin: str | None = Query(default=None),
+    horizon: int | None = Query(default=None),
+    snapshot_token: str | None = Header(default=None, alias="X-Snapshot-Token"),
+):
+    configured_token = settings.snapshot_token
+    if not configured_token:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "A snapshot gyujto nincs aktivalva."},
+        )
+    if snapshot_token is None or not secrets.compare_digest(
+        snapshot_token,
+        configured_token,
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Ervenytelen snapshot token."},
+        )
+    if (coin is None) != (horizon is None):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "A coin es horizon parametert egyutt kell megadni."},
+        )
+
+    scheduled = coin is None
+    if scheduled:
+        target = scheduled_snapshot_target()
+        selected_coin = target.coin
+        selected_horizon = target.horizon
+    else:
+        try:
+            selected_coin = validate_coin(coin or "")
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"detail": str(exc)})
+        selected_horizon = int(horizon or 0)
+        if selected_horizon not in {1, 7, 30}:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "Az idotav 1, 7 vagy 30 nap lehet."},
+            )
+
+    lock: asyncio.Lock = request.app.state.snapshot_lock
+    if lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Egy snapshot gyujtes mar folyamatban van."},
+        )
+
+    async with lock:
+        payload = await build_dashboard(
+            market_service(request),
+            selected_coin,
+            selected_horizon,
+        )
+        created = await record_dashboard_forecast(request, payload)
+        feature_store = await asyncio.to_thread(
+            journal_store(request).feature_status,
+            selected_coin,
+            selected_horizon,
+        )
+
+    return {
+        "status": "collected",
+        "scheduled": scheduled,
+        "generated_at": payload["generated_at"],
+        "target": {"coin": selected_coin, "horizon_days": selected_horizon},
+        "created": created,
+        "storage": journal_store(request).storage_status(),
+        "feature_store": feature_store,
+    }
 
 
 @app.get("/api/v1/dashboard")

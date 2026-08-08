@@ -1,6 +1,17 @@
 from app.forecast_store import ForecastStore
 
 
+class RecordingConnection:
+    def __init__(self):
+        self.statement = ""
+        self.parameters = ()
+
+    def execute(self, statement, parameters):
+        self.statement = statement
+        self.parameters = parameters
+        return self
+
+
 def sample_forecast(horizon_days: int = 7):
     return {
         "horizon_days": horizon_days,
@@ -106,3 +117,32 @@ def test_store_persists_point_in_time_feature_snapshots(tmp_path):
     assert status["feature_version"] == "1.0.0"
     assert status["latest_derivatives"]["funding_rate_pct"] == 0.01
     assert status["latest_model"]["model_version"] == "5.0.0"
+
+
+def test_store_reports_sqlite_as_local_fallback(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+
+    assert store.storage_status() == {"backend": "sqlite", "persistent": False}
+
+
+def test_store_accepts_explicit_postgresql_url_and_converts_placeholders():
+    store = ForecastStore("unused.sqlite3", "postgresql://user:secret@db/forecast")
+    connection = RecordingConnection()
+
+    store._execute(connection, "SELECT * FROM sample WHERE coin = ?", ("bitcoin",))
+
+    assert store.storage_status() == {
+        "backend": "postgresql",
+        "persistent": True,
+    }
+    assert connection.statement == "SELECT * FROM sample WHERE coin = %s"
+    assert connection.parameters == ("bitcoin",)
+
+
+def test_store_rejects_non_postgresql_database_url(tmp_path):
+    try:
+        ForecastStore(tmp_path / "forecast.sqlite3", "sqlite:///other.sqlite3")
+    except ValueError as exc:
+        assert "PostgreSQL URL" in str(exc)
+    else:
+        raise AssertionError("A non-PostgreSQL URL must be rejected")

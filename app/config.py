@@ -24,6 +24,11 @@ class Settings:
         "FORECAST_DB_PATH",
         "data/forecasts.sqlite3",
     ).strip()
+    forecast_database_url: str = os.getenv(
+        "FORECAST_DATABASE_URL",
+        "",
+    ).strip()
+    snapshot_token: str = os.getenv("SNAPSHOT_TOKEN", "").strip()
 
 
 settings = Settings()

@@ -1,7 +1,9 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+import main
 from app.forecast_store import ForecastStore
 from main import app
 
@@ -130,3 +132,121 @@ def test_forecast_registry_exposes_challengers_and_feature_status(tmp_path):
         "logistic",
         "hist_gradient_boosting",
     ]
+
+
+def snapshot_dashboard(coin: str = "bitcoin", horizon: int = 7):
+    return {
+        "generated_at": "2026-08-08T12:01:00+00:00",
+        "market": {"total_market_cap": 1_000_000.0},
+        "derivatives": {"available": False},
+        "news_sentiment": {"score": 0.1, "sample_size": 2},
+        "selected": {
+            "id": coin,
+            "symbol": "BTC",
+            "current_price": 100.0,
+            "change_24h": 1.0,
+            "change_7d": 2.0,
+            "forecast": {
+                "horizon_days": horizon,
+                "model": "test-model",
+                "model_version": "5.0.0",
+                "base_price": 100.0,
+                "target_price": 102.0,
+                "expected_change_pct": 2.0,
+                "direction_key": "bullish",
+                "confidence": 60,
+                "indicators": {"rsi": 55.0},
+                "specialist": {},
+                "probability_forecast": {},
+            },
+        },
+    }
+
+
+def test_snapshot_collector_is_disabled_without_token(monkeypatch):
+    monkeypatch.setattr(main, "settings", replace(main.settings, snapshot_token=""))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/internal/snapshots/collect")
+
+    assert response.status_code == 503
+
+
+def test_snapshot_collector_rejects_invalid_token(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, snapshot_token="collector-secret"),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/internal/snapshots/collect",
+            headers={"X-Snapshot-Token": "wrong-secret"},
+        )
+
+    assert response.status_code == 401
+
+
+def test_snapshot_collector_persists_manual_target(tmp_path, monkeypatch):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, snapshot_token="collector-secret"),
+    )
+
+    async def build_test_dashboard(_service, coin, horizon):
+        return snapshot_dashboard(coin, horizon)
+
+    monkeypatch.setattr(main, "build_dashboard", build_test_dashboard)
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.post(
+            "/api/v1/internal/snapshots/collect?coin=bitcoin&horizon=7",
+            headers={"X-Snapshot-Token": "collector-secret"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "collected"
+    assert payload["scheduled"] is False
+    assert payload["created"] == {"forecast": True, "feature_snapshot": True}
+    assert payload["feature_store"]["sample_count"] == 1
+
+
+def test_snapshot_collector_uses_scheduled_target(tmp_path, monkeypatch):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, snapshot_token="collector-secret"),
+    )
+    class Target:
+        coin = "ethereum"
+        horizon = 30
+
+    monkeypatch.setattr(main, "scheduled_snapshot_target", lambda: Target())
+
+    async def build_test_dashboard(_service, coin, horizon):
+        payload = snapshot_dashboard(coin, horizon)
+        payload["selected"]["symbol"] = "ETH"
+        return payload
+
+    monkeypatch.setattr(main, "build_dashboard", build_test_dashboard)
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.post(
+            "/api/v1/internal/snapshots/collect",
+            headers={"X-Snapshot-Token": "collector-secret"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scheduled"] is True
+    assert payload["target"] == {"coin": "ethereum", "horizon_days": 30}
+    assert store.feature_status("ethereum", 30)["sample_count"] == 1

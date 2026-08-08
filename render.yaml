@@ -15,3 +15,7 @@ services:
         sync: false
       - key: FORECAST_DB_PATH
         sync: false
+      - key: FORECAST_DATABASE_URL
+        sync: false
+      - key: SNAPSHOT_TOKEN
+        sync: false

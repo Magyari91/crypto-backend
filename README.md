@@ -24,6 +24,7 @@ Az API dokumentacioja: `http://localhost:8000/docs`
 - `GET /api/v1/derivatives?coin=bitcoin` - funding, open interest es pozicionalasi kontextus
 - `GET /api/v1/markets` - piaci lista
 - `GET /api/v1/news` - friss hirek
+- `POST /api/v1/internal/snapshots/collect` - vedett, utemezett feature-snapshot gyujto
 
 A regi `/market-overview`, `/crypto-data`, `/crypto-news` es
 `/crypto-indicators` vegpontok az atallas idejere tovabbra is elerhetok.
@@ -73,8 +74,9 @@ a modelljelolt szazalekat, hanem a historikus esemenyaranyt publikalja.
 Az API 80%-os empirikus arsavot is visszaad. Ez a korabbi holdout hibak
 eloszlasabol keszul, es nem garantalt arfolyamtartomany.
 
-Az elo elorejelzeseket a backend 15 perces idosavonkent a
-`FORECAST_DB_PATH` helyen levo SQLite naploba menti. A visszameres walk-forward
+Az elo elorejelzeseket a backend 15 perces idosavonkent naploba menti. Explicit
+`FORECAST_DATABASE_URL` eseten PostgreSQL-t, ennek hianyaban a
+`FORECAST_DB_PATH` helyen levo SQLite adatbazist hasznalja. A visszameres walk-forward
 modszert hasznal: minden tortenelmi tesztpont csak a korabban mar elerheto
 arfolyamadatokat latja. Az eredmenyt a valtozatlan arat feltetelezo
 alapmodellel es a specialista nelkuli v2 technikai modellel is osszehasonlitja.
@@ -123,9 +125,40 @@ eszkozokkel ismetelheto meg.
 
 ## Eles naplotarolas
 
-Helyben az alapertelmezett `data/forecasts.sqlite3` fajl elegendo. A Render
-alap fajlrendszere nem tartos, ezert eles naplozashoz csatolt persistent disk
-es azon beluli utvonal, peldaul `FORECAST_DB_PATH=/var/data/forecasts.sqlite3`
-szukseges. A lemez nem kapcsolodik be automatikusan, mert csak tamogatott,
-fizetos szolgaltatasi csomaghoz adhato. Reszletek a
+Helyben az alapertelmezett `data/forecasts.sqlite3` fajl elegendo. Elesben az
+ajanlott beallitas egy PostgreSQL kapcsolat:
+
+```text
+FORECAST_DATABASE_URL=postgresql://user:password@host:5432/database
+```
+
+A backend csak ezt az explicit valtozot olvassa; egy mas szolgaltatasbol maradt
+`DATABASE_URL` nem aktivalja veletlenul az adatbazist. Ha a valtozo nincs
+beallitva, a rendszer automatikusan SQLite-ra ter vissza. A `GET /health`
+valasz `storage` mezoje jelzi az aktiv backendet.
+
+A Render alap fajlrendszere nem tartos, ezert az ingyenes SQLite uzemmod
+deploy utan elveszitheti a korabbi mintakat. Alternativa egy csatolt persistent
+disk es azon beluli utvonal, peldaul
+`FORECAST_DB_PATH=/var/data/forecasts.sqlite3`. A lemez nem kapcsolodik be
+automatikusan, mert csak tamogatott, fizetos szolgaltatasi csomaghoz adhato.
+Reszletek a
 [Render persistent disk dokumentaciojaban](https://render.com/docs/disks) vannak.
+
+## Utemezett snapshot gyujtes
+
+A `.github/workflows/collect-snapshots.yml` workflow negyedkoronkent egyetlen
+erme/idotav part gyujt. Az otoras rotacio mind az ot tamogatott eszkozt es az
+1, 7, illetve 30 napos horizontot lefedi; a rovidebb BTC es ETH modellek surubb
+mintat kapnak. Az endpoint ugyanazt a dashboard- es modellfolyamatot hasznalja,
+mint a normal felulet, majd deduplikalva rogzit elorejelzest es point-in-time
+feature snapshotot.
+
+Az aktivalashoz ugyanazt az eros, veletlen tokent kell beallitani ket helyen:
+
+- Render environment: `SNAPSHOT_TOKEN`
+- GitHub repository secret: `SNAPSHOT_TOKEN`
+
+Token nelkul a gyujto `503`, hibas tokennel `401` valaszt ad. Kezi ellenorzeshez
+a workflow a GitHub Actions feluleterol is indithato. Celzott kezi gyujtesnel a
+vedett vegpont a `coin` es `horizon` query parametert egyutt fogadja el.

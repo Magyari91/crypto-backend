@@ -17,22 +17,88 @@ def _utc_datetime(value: str) -> datetime:
 
 
 class ForecastStore:
-    def __init__(self, database_path: str | Path):
+    def __init__(
+        self,
+        database_path: str | Path,
+        database_url: str | None = None,
+    ):
         self.database_path = Path(database_path)
+        self.database_url = (database_url or "").strip()
+        if self.database_url and not self.database_url.startswith(
+            ("postgresql://", "postgres://")
+        ):
+            raise ValueError("FORECAST_DATABASE_URL must be a PostgreSQL URL")
+        self.backend = "postgresql" if self.database_url else "sqlite"
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> Any:
+        if self.database_url:
+            try:
+                import psycopg
+                from psycopg.rows import dict_row
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PostgreSQL storage requires psycopg[binary]"
+                ) from exc
+            return psycopg.connect(
+                self.database_url,
+                connect_timeout=5,
+                row_factory=dict_row,
+            )
+
         connection = sqlite3.connect(self.database_path, timeout=5)
         connection.row_factory = sqlite3.Row
         return connection
 
-    def initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
+    def _execute(
+        self,
+        connection: Any,
+        statement: str,
+        parameters: tuple[Any, ...] = (),
+    ) -> Any:
+        if self.backend == "postgresql":
+            statement = statement.replace("?", "%s")
+        return connection.execute(statement, parameters)
+
+    def _column_names(self, connection: Any, table_name: str) -> set[str]:
+        if self.backend == "postgresql":
+            rows = self._execute(
+                connection,
                 """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = ?
+                """,
+                (table_name,),
+            ).fetchall()
+            return {str(row["column_name"]) for row in rows}
+        rows = self._execute(
+            connection,
+            f"PRAGMA table_info({table_name})",
+        ).fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def storage_status(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "persistent": self.backend == "postgresql",
+        }
+
+    def initialize(self) -> None:
+        if self.backend == "sqlite":
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        id_column = (
+            "BIGSERIAL PRIMARY KEY"
+            if self.backend == "postgresql"
+            else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        )
+        with self._connect() as connection:
+            if self.backend == "sqlite":
+                self._execute(connection, "PRAGMA journal_mode=WAL")
+            self._execute(
+                connection,
+                f"""
                 CREATE TABLE IF NOT EXISTS forecast_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {id_column},
                     coin_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     horizon_days INTEGER NOT NULL,
@@ -48,12 +114,9 @@ class ForecastStore:
                     indicators_json TEXT NOT NULL,
                     UNIQUE (coin_id, horizon_days, model_version, bucket_start)
                 )
-                """
+                """,
             )
-            existing_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(forecast_log)").fetchall()
-            }
+            existing_columns = self._column_names(connection, "forecast_log")
             probability_columns = {
                 "event_probability": "REAL",
                 "baseline_probability": "REAL",
@@ -63,19 +126,22 @@ class ForecastStore:
             }
             for column, column_type in probability_columns.items():
                 if column not in existing_columns:
-                    connection.execute(
+                    self._execute(
+                        connection,
                         f"ALTER TABLE forecast_log ADD COLUMN {column} {column_type}"
                     )
-            connection.execute(
+            self._execute(
+                connection,
                 """
                 CREATE INDEX IF NOT EXISTS idx_forecast_log_lookup
                 ON forecast_log (coin_id, horizon_days, generated_at DESC)
-                """
+                """,
             )
-            connection.execute(
-                """
+            self._execute(
+                connection,
+                f"""
                 CREATE TABLE IF NOT EXISTS feature_snapshot (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {id_column},
                     coin_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     horizon_days INTEGER NOT NULL,
@@ -89,13 +155,14 @@ class ForecastStore:
                     model_json TEXT NOT NULL,
                     UNIQUE (coin_id, horizon_days, feature_version, bucket_start)
                 )
-                """
+                """,
             )
-            connection.execute(
+            self._execute(
+                connection,
                 """
                 CREATE INDEX IF NOT EXISTS idx_feature_snapshot_lookup
                 ON feature_snapshot (coin_id, horizon_days, generated_at DESC)
-                """
+                """,
             )
 
     def record(
@@ -118,9 +185,10 @@ class ForecastStore:
         decision = probability.get("decision", {})
 
         with self._connect() as connection:
-            cursor = connection.execute(
+            cursor = self._execute(
+                connection,
                 """
-                INSERT OR IGNORE INTO forecast_log (
+                INSERT INTO forecast_log (
                     coin_id,
                     symbol,
                     horizon_days,
@@ -140,6 +208,8 @@ class ForecastStore:
                     probability_model_active,
                     probability_decision
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (coin_id, horizon_days, model_version, bucket_start)
+                DO NOTHING
                 """,
                 (
                     coin_id,
@@ -183,9 +253,10 @@ class ForecastStore:
             microsecond=0,
         )
         with self._connect() as connection:
-            cursor = connection.execute(
+            cursor = self._execute(
+                connection,
                 """
-                INSERT OR IGNORE INTO feature_snapshot (
+                INSERT INTO feature_snapshot (
                     coin_id,
                     symbol,
                     horizon_days,
@@ -198,6 +269,8 @@ class ForecastStore:
                     news_sentiment_json,
                     model_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (coin_id, horizon_days, feature_version, bucket_start)
+                DO NOTHING
                 """,
                 (
                     coin_id,
@@ -217,7 +290,8 @@ class ForecastStore:
 
     def feature_status(self, coin_id: str, horizon_days: int) -> dict[str, Any]:
         with self._connect() as connection:
-            summary = connection.execute(
+            summary = self._execute(
+                connection,
                 """
                 SELECT
                     COUNT(*) AS sample_count,
@@ -228,7 +302,8 @@ class ForecastStore:
                 """,
                 (coin_id, int(horizon_days)),
             ).fetchone()
-            latest = connection.execute(
+            latest = self._execute(
+                connection,
                 """
                 SELECT feature_version, derivatives_json, news_sentiment_json, model_json
                 FROM feature_snapshot
@@ -257,7 +332,8 @@ class ForecastStore:
 
     def recent(self, coin_id: str, horizon_days: int, limit: int = 12) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            rows = connection.execute(
+            rows = self._execute(
+                connection,
                 """
                 SELECT *
                 FROM forecast_log
