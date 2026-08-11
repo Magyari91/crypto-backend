@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 from app.forecast_store import ForecastStore
+from app.training_readiness import build_training_readiness
 
 
 class RecordingConnection:
@@ -117,6 +120,83 @@ def test_store_persists_point_in_time_feature_snapshots(tmp_path):
     assert status["feature_version"] == "1.0.0"
     assert status["latest_derivatives"]["funding_rate_pct"] == 0.01
     assert status["latest_model"]["model_version"] == "5.0.0"
+
+
+def test_store_settles_matured_feature_snapshots_once(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    store.record_feature_snapshot(
+        coin_id="bitcoin",
+        symbol="BTC",
+        generated_at="2026-07-10T12:01:00+00:00",
+        horizon_days=1,
+        market={"current_price": 100.0},
+        technical={"rsi": 52.0},
+        derivatives={"available": True},
+        news_sentiment={"score": 0.1},
+        model={
+            "model_version": "5.0.0",
+            "probability": {"event": {"target_return_pct": 1.0}},
+        },
+    )
+
+    early = store.settle_due_feature_snapshots(
+        "bitcoin",
+        1,
+        "2026-07-11T11:59:00+00:00",
+        102.0,
+    )
+    overdue = store.feature_status(
+        "bitcoin",
+        1,
+        now=datetime(2026, 7, 11, 12, 10, tzinfo=timezone.utc),
+    )
+    settled = store.settle_due_feature_snapshots(
+        "bitcoin",
+        1,
+        "2026-07-11T12:16:00+00:00",
+        102.0,
+    )
+    duplicate = store.settle_due_feature_snapshots(
+        "bitcoin",
+        1,
+        "2026-07-11T12:30:00+00:00",
+        103.0,
+    )
+    status = store.feature_status("bitcoin", 1)
+
+    assert early == 0
+    assert overdue["overdue_sample_count"] == 1
+    assert overdue["next_due_at"] == "2026-07-11T12:01:00+00:00"
+    assert settled == 1
+    assert duplicate == 0
+    assert status["sample_count"] == 1
+    assert status["labeled_sample_count"] == 1
+    assert status["pending_sample_count"] == 0
+    assert status["independent_labeled_days"] == 1
+    assert status["label_coverage_pct"] == 100.0
+    assert status["latest_outcome"]["realized_return_pct"] == 2.0
+    assert status["latest_outcome"]["label_lag_minutes"] == 15.0
+    assert status["latest_outcome"]["event_happened"] is True
+
+
+def test_training_readiness_requires_persistent_storage(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+
+    readiness = build_training_readiness(
+        store.feature_status("bitcoin", 7),
+        store.storage_status(),
+        7,
+    )
+
+    assert readiness["status"] == "storage_required"
+    assert readiness["ready_for_training"] is False
+    assert readiness["minimum_independent_labels"] == 360
+    assert readiness["candidate_minimums"] == {
+        "probability": 360,
+        "specialist": 140,
+    }
 
 
 def test_store_reports_sqlite_as_local_fallback(tmp_path):
