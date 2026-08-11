@@ -24,6 +24,7 @@ Az API dokumentacioja: `http://localhost:8000/docs`
 - `GET /api/v1/derivatives?coin=bitcoin` - funding, open interest es pozicionalasi kontextus
 - `GET /api/v1/markets` - piaci lista
 - `GET /api/v1/news` - friss hirek
+- `GET /api/v1/news/sentiment?coin=bitcoin` - eszkozspecifikus hirhangulat es auditadatok
 - `POST /api/v1/internal/snapshots/collect` - vedett, utemezett feature-snapshot gyujto
 
 A regi `/market-overview`, `/crypto-data`, `/crypto-news` es
@@ -85,7 +86,8 @@ a valoszinusegi kapu allapotat is taroljak.
 
 Ugyanebbe az adatbazisba valtoztathatatlan point-in-time feature snapshot is
 kerul: piaci allapot, technikai mutatok, Binance USD-M futures kontextus,
-headline-lexikonos hirhangulat es az aktualis modellallapot. Ez a kesobbi
+VADER + kriptos penzugyi lexikonos hirhangulat es az aktualis modellallapot. A
+sentiment egyelore `context_only`, 0%-os elorejelzesi sullyal szerepel. Ez a kesobbi
 leakage-mentes ujratanitas alapja. Az open interest, globalis long/short es taker
 statisztikak publikus Binance tortenete jelenleg legfeljebb 30 nap, ezert ezek
 meg csak gyujtott challenger-adatok; a hosszabb funding-idosor mar a v5

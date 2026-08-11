@@ -31,6 +31,7 @@ from app.forecast import DIRECTION_THRESHOLDS, MODEL_VERSION
 from app.forecast_store import ForecastStore
 from app.market_data import MarketDataService, UpstreamServiceError
 from app.model_lab import build_model_lab
+from app.news import aggregate_news_sentiment
 from app.probability_models import probability_registry_payload
 from app.snapshot_schedule import scheduled_snapshot_target
 from app.specialist_models import specialist_registry_payload
@@ -554,6 +555,28 @@ async def derivatives(
 async def news(request: Request, limit: int = Query(default=6, ge=1, le=20)):
     data = await market_service(request).news()
     return normalize_news(data)[:limit]
+
+
+@app.get("/api/v1/news/sentiment")
+async def news_sentiment(
+    request: Request,
+    response: Response,
+    coin: str = Query(default="bitcoin"),
+    limit: int = Query(default=20, ge=1, le=20),
+):
+    try:
+        selected_coin = validate_coin(coin)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    rows = normalize_news(await market_service(request).news())[:limit]
+    response.headers["Cache-Control"] = "public, max-age=120, stale-while-revalidate=600"
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "asset": {"id": selected_coin, **SUPPORTED_COINS[selected_coin]},
+        "sentiment": aggregate_news_sentiment(rows, selected_coin),
+        "articles": rows,
+    }
 
 
 @app.get("/api/v1/search")
