@@ -177,6 +177,8 @@ async def build_dashboard(
     fear_value = int(fear_greed.get("value", 0)) if fear_greed else None
     fear_label = fear_greed.get("value_classification") if fear_greed else None
     news_rows = normalize_news(articles)
+    news_sentiment = aggregate_news_sentiment(news_rows, selected_coin)
+    selected["forecast"]["sentiment_context"] = dict(news_sentiment)
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -199,7 +201,7 @@ async def build_dashboard(
                 "status": "unavailable",
             },
         ),
-        "news_sentiment": aggregate_news_sentiment(news_rows, selected_coin),
+        "news_sentiment": news_sentiment,
         "selected": selected,
         "movers": {
             "gainers": sorted_movers[:5],

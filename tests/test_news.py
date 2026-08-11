@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from app.news import (
     aggregate_news_sentiment,
     article_sentiment,
@@ -134,3 +136,106 @@ def test_news_sentiment_is_coin_specific_and_auditable():
     assert bitcoin["coin_specific"] is True
     assert bitcoin["sample_size"] == 1
     assert bitcoin["label"] == "positive"
+    assert bitcoin["method"] == "vader_crypto_lexicon_v2"
+    assert bitcoin["scope"] == "asset"
+    assert bitcoin["forecast_weight_pct"] == 0.0
+    assert articles[0]["sentiment"]["matched_terms"]
+
+
+def test_article_sentiment_handles_negation_and_crypto_phrases():
+    negative = article_sentiment(
+        "Bitcoin is not bullish after ETF outflow",
+        "Traders fear a bearish breakdown.",
+    )
+
+    assert negative["label"] == "negative"
+    assert negative["score"] < -0.3
+    assert negative["negative_pct"] > negative["positive_pct"]
+    assert {item["term"] for item in negative["matched_terms"]} >= {
+        "bullish",
+        "etf outflow",
+        "bearish breakdown",
+    }
+
+
+def test_article_sentiment_disambiguates_bip_and_flags_crackdown():
+    governance = article_sentiment(
+        "Luke Dashjr removed as Bitcoin Improvement Proposal editor",
+        "He lost BIP editor privileges after concerns over a stalled fork.",
+    )
+    crackdown = article_sentiment(
+        "Bitcoin ATMs pulled as regulators signal wider crackdown",
+        "The operator was suspended by the regulator.",
+    )
+
+    assert governance["label"] == "negative"
+    assert crackdown["label"] == "negative"
+    assert {item["term"] for item in crackdown["matched_terms"]} >= {
+        "crackdown",
+        "suspended",
+    }
+
+
+def test_news_sentiment_weights_fresh_articles_and_reports_trend():
+    now = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    rows = normalize_articles(
+        [
+            {
+                "title": "Bitcoin rally reaches record high",
+                "url": "https://example.test/old-positive",
+                "source": "Source A",
+                "published_at": (now - timedelta(days=7)).isoformat(),
+            },
+            {
+                "title": "Bitcoin crash triggers liquidation cascade",
+                "url": "https://example.test/recent-negative",
+                "source": "Source B",
+                "published_at": (now - timedelta(hours=2)).isoformat(),
+            },
+            {
+                "title": "Bitcoin exploit causes losses",
+                "url": "https://example.test/recent-negative-2",
+                "source": "Source C",
+                "published_at": (now - timedelta(hours=4)).isoformat(),
+            },
+            {
+                "title": "Bitcoin adoption growth continues",
+                "url": "https://example.test/old-positive-2",
+                "source": "Source D",
+                "published_at": (now - timedelta(days=6)).isoformat(),
+            },
+        ]
+    )
+
+    result = aggregate_news_sentiment(rows, "bitcoin", now=now)
+
+    assert result["label"] == "negative"
+    assert result["trend"] == "deteriorating"
+    assert result["source_count"] == 4
+    assert result["freshness_hours"] == 2.0
+    assert result["positive_pct"] + result["neutral_pct"] + result["negative_pct"] == 100
+
+
+def test_news_sentiment_falls_back_to_market_scope():
+    rows = normalize_articles(
+        [
+            {
+                "title": "Ethereum network upgrade supports growth",
+                "url": "https://example.test/ethereum",
+                "source": "Example",
+            }
+        ]
+    )
+
+    result = aggregate_news_sentiment(rows, "bitcoin")
+
+    assert result["coin_specific"] is False
+    assert result["scope"] == "market"
+    assert result["sample_size"] == 1
+
+
+def test_empty_news_sentiment_has_no_artificial_confidence():
+    result = aggregate_news_sentiment([], "bitcoin")
+
+    assert result["sample_size"] == 0
+    assert result["confidence_pct"] == 0

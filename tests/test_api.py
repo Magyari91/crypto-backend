@@ -51,12 +51,40 @@ class AnalyticsMarketData:
         }
 
 
+class NewsMarketData:
+    async def news(self):
+        return [
+            {
+                "id": "bitcoin-story",
+                "title": "Bitcoin ETF approval drives bullish inflows",
+                "url": "https://example.test/bitcoin-story",
+                "source_info": {"name": "Example News"},
+                "published_on": 1_786_441_200,
+                "body": "Institutional adoption supports the rally.",
+            }
+        ]
+
+
 def test_health_endpoint():
     with TestClient(app) as client:
         response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_news_sentiment_endpoint_exposes_asset_context_and_articles():
+    with TestClient(app) as client:
+        app.state.market_data = NewsMarketData()
+        response = client.get("/api/v1/news/sentiment?coin=bitcoin&limit=10")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["asset"] == {"id": "bitcoin", "symbol": "BTC", "name": "Bitcoin"}
+    assert payload["sentiment"]["label"] == "positive"
+    assert payload["sentiment"]["role"] == "context_only"
+    assert payload["sentiment"]["forecast_weight_pct"] == 0.0
+    assert payload["articles"][0]["sentiment"]["method"] == "vader_crypto_lexicon_v2"
 
 
 def test_dashboard_rejects_unknown_coin_before_upstream_call():
