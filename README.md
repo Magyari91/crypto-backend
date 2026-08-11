@@ -91,6 +91,14 @@ statisztikak publikus Binance tortenete jelenleg legfeljebb 30 nap, ezert ezek
 meg csak gyujtott challenger-adatok; a hosszabb funding-idosor mar a v5
 valoszinusegi feature-keszletenek resze.
 
+A horizont lejarata utan az elso uj piaci megfigyeles idempotens
+`feature_outcome` cimket keszit. Ez tarolja a tenyleges arat, a realizalt
+hozamot, az esemeny bekovetkezeset es a cimke keseset, igy ugyanaz a snapshot
+tobbszori collector-futasnal sem irhato felul. A registry es az analytics
+`training_readiness` mezoje kulon mutatja a nyers, lezart, kesesben levo es napi
+szinten fuggetlen mintakat. A tanitasi kapu csak tartos tarhely es a
+horizont-specifikus minimum elerese utan valhat kesz allapotuva.
+
 A webes analytics keres az elso, koltseges visszamerest hatterfeladatkent
 inditja, es `202 pending` allapottal kerheto le ujra. A dashboard 60 lezart
 pontot es legfeljebb 60 napos refit-suruseget hasznal a gyors auditban; a
@@ -138,8 +146,8 @@ beallitva, a rendszer automatikusan SQLite-ra ter vissza. A `GET /health`
 valasz `storage` mezoje jelzi az aktiv backendet.
 
 A Render alap fajlrendszere nem tartos, ezert az ingyenes SQLite uzemmod
-deploy utan elveszitheti a korabbi mintakat. Alternativa egy csatolt persistent
-disk es azon beluli utvonal, peldaul
+deploy vagy peldany-ujrainditas utan elveszitheti a korabbi mintakat.
+Alternativa egy csatolt persistent disk es azon beluli utvonal, peldaul
 `FORECAST_DB_PATH=/var/data/forecasts.sqlite3`. A lemez nem kapcsolodik be
 automatikusan, mert csak tamogatott, fizetos szolgaltatasi csomaghoz adhato.
 Reszletek a

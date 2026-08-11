@@ -34,6 +34,7 @@ from app.model_lab import build_model_lab
 from app.probability_models import probability_registry_payload
 from app.snapshot_schedule import scheduled_snapshot_target
 from app.specialist_models import specialist_registry_payload
+from app.training_readiness import build_training_readiness
 
 
 @asynccontextmanager
@@ -92,7 +93,10 @@ def journal_store(request: Request) -> ForecastStore:
     return request.app.state.forecast_store
 
 
-async def record_dashboard_forecast(request: Request, payload: dict) -> dict[str, bool]:
+async def record_dashboard_forecast(
+    request: Request,
+    payload: dict,
+) -> dict[str, bool | int]:
     selected = payload["selected"]
     forecast = selected["forecast"]
     store = journal_store(request)
@@ -125,9 +129,16 @@ async def record_dashboard_forecast(request: Request, payload: dict) -> dict[str
                 "probability": forecast.get("probability_forecast", {}),
             },
         )
+        outcomes_settled = store.settle_due_feature_snapshots(
+            coin_id=selected["id"],
+            horizon_days=int(forecast["horizon_days"]),
+            observed_at=payload["generated_at"],
+            observed_price=selected.get("current_price"),
+        )
         return {
             "forecast": forecast_created,
             "feature_snapshot": snapshot_created,
+            "outcomes_settled": outcomes_settled,
         }
 
     return await asyncio.to_thread(persist)
@@ -217,7 +228,11 @@ async def collect_snapshot(
             selected_coin,
             selected_horizon,
         )
-        created = await record_dashboard_forecast(request, payload)
+        persistence = await record_dashboard_forecast(request, payload)
+        created = {
+            "forecast": bool(persistence["forecast"]),
+            "feature_snapshot": bool(persistence["feature_snapshot"]),
+        }
         feature_store = await asyncio.to_thread(
             journal_store(request).feature_status,
             selected_coin,
@@ -239,6 +254,7 @@ async def collect_snapshot(
         "generated_at": payload["generated_at"],
         "target": {"coin": selected_coin, "horizon_days": selected_horizon},
         "created": created,
+        "outcomes_settled": persistence["outcomes_settled"],
         "storage": journal_store(request).storage_status(),
         "feature_store": feature_summary,
     }
@@ -318,16 +334,23 @@ async def forecast_analytics(
         if selected_coin == "bitcoin"
         else load_forecast_history(market_service(request), "bitcoin")
     )
+    store = journal_store(request)
     history_task = asyncio.to_thread(
-        journal_store(request).recent,
+        store.recent,
         selected_coin,
         horizon,
         12,
     )
-    chart, benchmark_chart, history = await asyncio.gather(
+    feature_status_task = asyncio.to_thread(
+        store.feature_status,
+        selected_coin,
+        horizon,
+    )
+    chart, benchmark_chart, history, feature_status = await asyncio.gather(
         chart_task,
         benchmark_task,
         history_task,
+        feature_status_task,
     )
     benchmark_chart = chart if benchmark_chart is None else benchmark_chart
     prices = chart.get("prices", [])
@@ -380,6 +403,11 @@ async def forecast_analytics(
         "horizon_days": horizon,
         "history": evaluated_history,
         "history_bucket_minutes": 15,
+        "training_readiness": build_training_readiness(
+            feature_status,
+            store.storage_status(),
+            horizon,
+        ),
         "disclaimer": "A múltbeli eredmény nem garantálja a jövőbeli teljesítményt.",
     }
     if job_status.state != "ready":
@@ -486,6 +514,7 @@ async def forecast_registry(
         selected_coin,
         horizon,
     )
+    storage = journal_store(request).storage_status()
     return {
         "model_version": MODEL_VERSION,
         "asset": {"id": selected_coin, **SUPPORTED_COINS[selected_coin]},
@@ -493,6 +522,12 @@ async def forecast_registry(
         "probability_models": probability_registry_payload(),
         "specialist_models": specialist_registry_payload(),
         "feature_store": feature_store,
+        "storage": storage,
+        "training_readiness": build_training_readiness(
+            feature_store,
+            storage,
+            horizon,
+        ),
         "activation_policy": (
             "A challenger csak pozitív validációs és érintetlen holdout-előny, "
             "stabil idősávok, elfogadható kalibráció és alacsony eloszláseltolódás "

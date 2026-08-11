@@ -79,6 +79,7 @@ def test_forecast_analytics_endpoint(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["asset"]["symbol"] == "BTC"
+    assert payload["training_readiness"]["status"] == "storage_required"
     assert payload["backtest"]["summary"]["samples"] > 50
     assert payload["backtest"]["model"]["version"] == "5.0.0"
     probability = payload["backtest"]["summary"]["probability"]
@@ -125,6 +126,8 @@ def test_forecast_registry_exposes_challengers_and_feature_status(tmp_path):
     payload = response.json()
     assert payload["model_version"] == "5.0.0"
     assert payload["feature_store"]["sample_count"] == 0
+    assert payload["storage"] == {"backend": "sqlite", "persistent": False}
+    assert payload["training_readiness"]["status"] == "storage_required"
     seven_day = next(
         item for item in payload["probability_models"] if item["horizon_days"] == 7
     )
@@ -214,6 +217,7 @@ def test_snapshot_collector_persists_manual_target(tmp_path, monkeypatch):
     assert payload["status"] == "collected"
     assert payload["scheduled"] is False
     assert payload["created"] == {"forecast": True, "feature_snapshot": True}
+    assert payload["outcomes_settled"] == 0
     assert payload["feature_store"]["sample_count"] == 1
     assert set(payload["feature_store"]) == {
         "feature_version",

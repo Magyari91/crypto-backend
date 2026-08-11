@@ -164,6 +164,30 @@ class ForecastStore:
                 ON feature_snapshot (coin_id, horizon_days, generated_at DESC)
                 """,
             )
+            self._execute(
+                connection,
+                """
+                CREATE TABLE IF NOT EXISTS feature_outcome (
+                    feature_snapshot_id BIGINT PRIMARY KEY,
+                    due_at TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    outcome_price REAL NOT NULL,
+                    realized_return_pct REAL NOT NULL,
+                    label_lag_minutes REAL NOT NULL,
+                    event_target_return_pct REAL,
+                    event_happened INTEGER,
+                    FOREIGN KEY (feature_snapshot_id)
+                        REFERENCES feature_snapshot(id) ON DELETE CASCADE
+                )
+                """,
+            )
+            self._execute(
+                connection,
+                """
+                CREATE INDEX IF NOT EXISTS idx_feature_outcome_observed
+                ON feature_outcome (observed_at DESC)
+                """,
+            )
 
     def record(
         self,
@@ -288,17 +312,132 @@ class ForecastStore:
             )
             return cursor.rowcount == 1
 
-    def feature_status(self, coin_id: str, horizon_days: int) -> dict[str, Any]:
+    def settle_due_feature_snapshots(
+        self,
+        coin_id: str,
+        horizon_days: int,
+        observed_at: str,
+        observed_price: float | int | str | None,
+    ) -> int:
+        timestamp = _utc_datetime(observed_at)
+        try:
+            price = float(observed_price)
+        except (TypeError, ValueError):
+            return 0
+        if price <= 0:
+            return 0
+
+        settled = 0
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT
+                    snapshot.id,
+                    snapshot.generated_at,
+                    snapshot.horizon_days,
+                    snapshot.market_json,
+                    snapshot.model_json
+                FROM feature_snapshot AS snapshot
+                LEFT JOIN feature_outcome AS outcome
+                    ON outcome.feature_snapshot_id = snapshot.id
+                WHERE
+                    snapshot.coin_id = ?
+                    AND snapshot.horizon_days = ?
+                    AND outcome.feature_snapshot_id IS NULL
+                ORDER BY snapshot.generated_at
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchall()
+
+            for row in rows:
+                generated_at = _utc_datetime(row["generated_at"])
+                due_at = generated_at + timedelta(days=int(row["horizon_days"]))
+                if due_at > timestamp:
+                    continue
+
+                market = json.loads(row["market_json"])
+                try:
+                    base_price = float(market.get("current_price"))
+                except (TypeError, ValueError):
+                    continue
+                if base_price <= 0:
+                    continue
+
+                realized_return = ((price / base_price) - 1) * 100
+                model = json.loads(row["model_json"])
+                event = (model.get("probability") or {}).get("event") or {}
+                try:
+                    event_threshold = float(event["target_return_pct"])
+                except (KeyError, TypeError, ValueError):
+                    event_threshold = None
+                event_happened = (
+                    int(realized_return >= event_threshold)
+                    if event_threshold is not None
+                    else None
+                )
+                cursor = self._execute(
+                    connection,
+                    """
+                    INSERT INTO feature_outcome (
+                        feature_snapshot_id,
+                        due_at,
+                        observed_at,
+                        outcome_price,
+                        realized_return_pct,
+                        label_lag_minutes,
+                        event_target_return_pct,
+                        event_happened
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (feature_snapshot_id) DO NOTHING
+                    """,
+                    (
+                        row["id"],
+                        due_at.isoformat(),
+                        timestamp.isoformat(),
+                        price,
+                        realized_return,
+                        max(0.0, (timestamp - due_at).total_seconds() / 60),
+                        event_threshold,
+                        event_happened,
+                    ),
+                )
+                settled += int(cursor.rowcount == 1)
+
+        return settled
+
+    def feature_status(
+        self,
+        coin_id: str,
+        horizon_days: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        current_time = current_time.astimezone(timezone.utc)
+
         with self._connect() as connection:
             summary = self._execute(
                 connection,
                 """
                 SELECT
                     COUNT(*) AS sample_count,
-                    MIN(generated_at) AS first_generated_at,
-                    MAX(generated_at) AS last_generated_at
-                FROM feature_snapshot
-                WHERE coin_id = ? AND horizon_days = ?
+                    SUM(
+                        CASE WHEN outcome.feature_snapshot_id IS NOT NULL THEN 1 ELSE 0 END
+                    ) AS labeled_sample_count,
+                    COUNT(DISTINCT CASE
+                        WHEN outcome.feature_snapshot_id IS NOT NULL
+                        THEN SUBSTR(snapshot.generated_at, 1, 10)
+                    END) AS independent_labeled_days,
+                    MIN(snapshot.generated_at) AS first_generated_at,
+                    MAX(snapshot.generated_at) AS last_generated_at,
+                    MIN(outcome.observed_at) AS first_labeled_at,
+                    MAX(outcome.observed_at) AS last_labeled_at
+                FROM feature_snapshot AS snapshot
+                LEFT JOIN feature_outcome AS outcome
+                    ON outcome.feature_snapshot_id = snapshot.id
+                WHERE snapshot.coin_id = ? AND snapshot.horizon_days = ?
                 """,
                 (coin_id, int(horizon_days)),
             ).fetchone()
@@ -313,14 +452,97 @@ class ForecastStore:
                 """,
                 (coin_id, int(horizon_days)),
             ).fetchone()
+            pending_rows = self._execute(
+                connection,
+                """
+                SELECT snapshot.generated_at, snapshot.horizon_days
+                FROM feature_snapshot AS snapshot
+                LEFT JOIN feature_outcome AS outcome
+                    ON outcome.feature_snapshot_id = snapshot.id
+                WHERE
+                    snapshot.coin_id = ?
+                    AND snapshot.horizon_days = ?
+                    AND outcome.feature_snapshot_id IS NULL
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchall()
+            latest_outcome = self._execute(
+                connection,
+                """
+                SELECT
+                    outcome.due_at,
+                    outcome.observed_at,
+                    outcome.outcome_price,
+                    outcome.realized_return_pct,
+                    outcome.label_lag_minutes,
+                    outcome.event_target_return_pct,
+                    outcome.event_happened
+                FROM feature_outcome AS outcome
+                JOIN feature_snapshot AS snapshot
+                    ON snapshot.id = outcome.feature_snapshot_id
+                WHERE snapshot.coin_id = ? AND snapshot.horizon_days = ?
+                ORDER BY outcome.observed_at DESC
+                LIMIT 1
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchone()
+
+        sample_count = int(summary["sample_count"] if summary else 0)
+        labeled_count = int((summary["labeled_sample_count"] if summary else 0) or 0)
+        pending_due_dates = [
+            _utc_datetime(row["generated_at"])
+            + timedelta(days=int(row["horizon_days"]))
+            for row in pending_rows
+        ]
+        overdue_count = sum(due_at <= current_time for due_at in pending_due_dates)
 
         return {
             "feature_version": (
                 latest["feature_version"] if latest else FEATURE_SNAPSHOT_VERSION
             ),
-            "sample_count": int(summary["sample_count"] if summary else 0),
+            "sample_count": sample_count,
+            "labeled_sample_count": labeled_count,
+            "pending_sample_count": sample_count - labeled_count,
+            "overdue_sample_count": overdue_count,
+            "independent_labeled_days": int(
+                (summary["independent_labeled_days"] if summary else 0) or 0
+            ),
+            "label_coverage_pct": round(
+                (labeled_count / sample_count) * 100,
+                2,
+            ) if sample_count else 0.0,
             "first_generated_at": summary["first_generated_at"] if summary else None,
             "last_generated_at": summary["last_generated_at"] if summary else None,
+            "first_labeled_at": summary["first_labeled_at"] if summary else None,
+            "last_labeled_at": summary["last_labeled_at"] if summary else None,
+            "next_due_at": (
+                min(pending_due_dates).isoformat() if pending_due_dates else None
+            ),
+            "latest_outcome": (
+                {
+                    "due_at": latest_outcome["due_at"],
+                    "observed_at": latest_outcome["observed_at"],
+                    "outcome_price": latest_outcome["outcome_price"],
+                    "realized_return_pct": round(
+                        float(latest_outcome["realized_return_pct"]),
+                        4,
+                    ),
+                    "label_lag_minutes": round(
+                        float(latest_outcome["label_lag_minutes"]),
+                        2,
+                    ),
+                    "event_target_return_pct": latest_outcome[
+                        "event_target_return_pct"
+                    ],
+                    "event_happened": (
+                        bool(latest_outcome["event_happened"])
+                        if latest_outcome["event_happened"] is not None
+                        else None
+                    ),
+                }
+                if latest_outcome
+                else None
+            ),
             "latest_derivatives": (
                 json.loads(latest["derivatives_json"]) if latest else None
             ),
