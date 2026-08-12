@@ -43,6 +43,7 @@ class MarketDataService:
         coin_id: str(metadata["name"])
         for coin_id, metadata in ANALYSIS_ASSETS.items()
     }
+    FUTURES_CATALOG_SYMBOLS = {"HYPE"}
 
     def __init__(self):
         self._client: httpx2.AsyncClient | None = None
@@ -176,16 +177,16 @@ class MarketDataService:
             raise UpstreamServiceError("Binance", "Unexpected ticker response")
         return [item for item in data if isinstance(item, dict)]
 
-    async def _binance_futures_tickers(self) -> list[dict[str, Any]]:
+    async def _binance_futures_ticker(self, symbol: str) -> dict[str, Any]:
         data = await self._get_json(
             "Binance Futures",
             f"{self.BINANCE_FUTURES_URL}/fapi/v1/ticker/24hr",
-            None,
+            {"symbol": f"{symbol}USDT"},
             settings.market_cache_seconds,
         )
-        if not isinstance(data, list):
+        if not isinstance(data, dict):
             raise UpstreamServiceError("Binance Futures", "Unexpected ticker response")
-        return [item for item in data if isinstance(item, dict)]
+        return data
 
     async def market_catalog(self, limit: int = 200) -> list[dict[str, Any]]:
         data = await self._binance_spot_tickers()
@@ -213,29 +214,32 @@ class MarketDataService:
             spot_symbols.add(symbol)
             candidates.append((quote_volume, symbol, ticker, "Binance Spot"))
 
-        missing_analysis_symbols = set(analysis_by_symbol) - spot_symbols
-        if missing_analysis_symbols:
+        missing_analysis_symbols = (
+            set(analysis_by_symbol) - spot_symbols
+        ) & self.FUTURES_CATALOG_SYMBOLS
+        futures_tickers = []
+        for symbol in missing_analysis_symbols:
             try:
-                futures_tickers = await self._binance_futures_tickers()
+                futures_tickers.append(await self._binance_futures_ticker(symbol))
             except UpstreamServiceError:
-                futures_tickers = []
-            for ticker in futures_tickers:
-                pair = str(ticker.get("symbol", "")).upper()
-                if not pair.endswith("USDT"):
-                    continue
-                symbol = pair[:-4]
-                if symbol not in missing_analysis_symbols:
-                    continue
-                try:
-                    quote_volume = float(ticker.get("quoteVolume", 0))
-                    last_price = float(ticker.get("lastPrice", 0))
-                except (TypeError, ValueError):
-                    continue
-                if quote_volume <= 0 or last_price <= 0:
-                    continue
-                candidates.append(
-                    (quote_volume, symbol, ticker, "Binance Futures")
-                )
+                continue
+        for ticker in futures_tickers:
+            pair = str(ticker.get("symbol", "")).upper()
+            if not pair.endswith("USDT"):
+                continue
+            symbol = pair[:-4]
+            if symbol not in missing_analysis_symbols:
+                continue
+            try:
+                quote_volume = float(ticker.get("quoteVolume", 0))
+                last_price = float(ticker.get("lastPrice", 0))
+            except (TypeError, ValueError):
+                continue
+            if quote_volume <= 0 or last_price <= 0:
+                continue
+            candidates.append(
+                (quote_volume, symbol, ticker, "Binance Futures")
+            )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         markets = []
