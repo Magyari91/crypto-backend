@@ -8,9 +8,11 @@ from app.market_data import MarketDataService, UpstreamServiceError
 class BinanceHistoryService(MarketDataService):
     def __init__(self):
         self.calls = []
+        self.requests = []
 
     async def _get_json(self, service, url, params, cache_seconds, headers=None):
         self.calls.append(params)
+        self.requests.append((service, url, params))
         if "endTime" not in params:
             origins = range(95, 1095)
         else:
@@ -43,12 +45,25 @@ def test_binance_history_paginates_beyond_one_thousand_days():
     assert service.calls[1]["limit"] == 95
 
 
+def test_hype_daily_history_uses_binance_futures_klines():
+    service = BinanceHistoryService()
+
+    history = asyncio.run(service._binance_history("HYPE", 365))
+
+    assert len(history["prices"]) == 365
+    assert history["source"] == "Binance Futures (USDT)"
+    assert service.requests[0][0] == "Binance Futures"
+    assert service.requests[0][1].endswith("/fapi/v1/klines")
+
+
 class BinanceIntradayService(MarketDataService):
     def __init__(self):
         self.calls = []
+        self.requests = []
 
     async def _get_json(self, service, url, params, cache_seconds, headers=None):
         self.calls.append(params)
+        self.requests.append((service, url, params))
         call_index = len(self.calls)
         if call_index == 1:
             origins = range(1200, 2200)
@@ -81,6 +96,17 @@ def test_binance_intraday_history_returns_hourly_ohlcv():
     assert history["candles"][0]["open"] == 100.0
     assert history["candles"][-1]["volume"] == 1000.0
     assert [call["limit"] for call in service.calls] == [1000, 1000, 200]
+
+
+def test_hype_intraday_history_uses_binance_futures_klines():
+    service = BinanceIntradayService()
+
+    history = asyncio.run(service._binance_intraday_history("HYPE", 720))
+
+    assert len(history["candles"]) == 720
+    assert history["source"] == "Binance Futures (USDT)"
+    assert service.requests[0][0] == "Binance Futures"
+    assert service.requests[0][1].endswith("/fapi/v1/klines")
 
 
 class BinanceDerivativesService(MarketDataService):

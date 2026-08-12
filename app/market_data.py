@@ -312,8 +312,22 @@ class MarketDataService:
             settings.chart_cache_seconds,
         )
 
+    def _binance_kline_config(self, symbol: str) -> tuple[str, str, str]:
+        if symbol in self.FUTURES_CATALOG_SYMBOLS:
+            return (
+                "Binance Futures",
+                f"{self.BINANCE_FUTURES_URL}/fapi/v1/klines",
+                "Binance Futures (USDT)",
+            )
+        return (
+            "Binance",
+            f"{self.BINANCE_MARKET_URL}/klines",
+            "Binance (USDT)",
+        )
+
     async def _binance_history(self, symbol: str, days: int) -> dict[str, Any]:
         requested_days = min(max(days, 61), 2000)
+        service_name, kline_url, source_label = self._binance_kline_config(symbol)
         candles: dict[int, list[Any]] = {}
         end_time = None
 
@@ -327,8 +341,8 @@ class MarketDataService:
             if end_time is not None:
                 params["endTime"] = end_time
             rows = await self._get_json(
-                "Binance",
-                f"{self.BINANCE_MARKET_URL}/klines",
+                service_name,
+                kline_url,
                 params,
                 settings.chart_cache_seconds,
             )
@@ -357,11 +371,11 @@ class MarketDataService:
             volumes.append([timestamp, max(quote_volume, 0.0)])
 
         if len(prices) < 61:
-            raise UpstreamServiceError("Binance", "Not enough historical data")
+            raise UpstreamServiceError(service_name, "Not enough historical data")
         return {
             "prices": prices,
             "total_volumes": volumes,
-            "source": "Binance (USDT)",
+            "source": source_label,
         }
 
     async def _binance_intraday_history(
@@ -370,6 +384,7 @@ class MarketDataService:
         hours: int,
     ) -> dict[str, Any]:
         requested_hours = min(max(hours, 720), 10_000)
+        service_name, kline_url, source_label = self._binance_kline_config(symbol)
         rows_by_timestamp: dict[int, list[Any]] = {}
         end_time = None
 
@@ -383,8 +398,8 @@ class MarketDataService:
             if end_time is not None:
                 params["endTime"] = end_time
             rows = await self._get_json(
-                "Binance",
-                f"{self.BINANCE_MARKET_URL}/klines",
+                service_name,
+                kline_url,
                 params,
                 settings.chart_cache_seconds,
             )
@@ -423,10 +438,13 @@ class MarketDataService:
             )
 
         if len(candles) < 720:
-            raise UpstreamServiceError("Binance", "Not enough hourly historical data")
+            raise UpstreamServiceError(
+                service_name,
+                "Not enough hourly historical data",
+            )
         return {
             "candles": candles,
-            "source": "Binance (USDT)",
+            "source": source_label,
             "interval": "1h",
         }
 
