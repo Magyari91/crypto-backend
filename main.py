@@ -498,12 +498,20 @@ async def markets(
 ):
     service = market_service(request)
     source = "CoinGecko"
+    ranking_basis = "market_cap"
     partial = False
     try:
         data = await service.markets(per_page=limit, sparkline=False)
     except UpstreamServiceError:
-        data = await service.supported_markets()
-        source = "Binance Spot"
+        fallback_catalog = getattr(service, "market_catalog", None)
+        if callable(fallback_catalog):
+            data = await fallback_catalog(limit=limit)
+            source = "Binance Spot"
+            ranking_basis = "quote_volume_24h"
+        else:
+            data = await service.supported_markets()
+            source = "Binance Spot"
+            ranking_basis = "analysis_assets"
         partial = True
 
     rows = normalize_market_rows(data)
@@ -511,6 +519,7 @@ async def markets(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "ranking_basis": ranking_basis,
         "partial": partial,
         "requested_limit": limit,
         "count": len(rows),

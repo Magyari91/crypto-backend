@@ -33,7 +33,9 @@ A regi `/market-overview`, `/crypto-data`, `/crypto-news` es
 Az arfolyamkatalogus es az elorejelzesi kor kulon adatfolyam. A katalogus
 legfeljebb 200 rangsorolt eszkozt ad vissza, mig modell- es hirhangulat-elemzes
 10 nagy, likvid, nem-stabil eszkozre keszul. Az API minden sornal jelzi az
-`analysis_available` allapotot.
+`analysis_available` allapotot. CoinGecko-kimaradas eseten a katalogus a
+Binance USDT spot parjaibol, 24 oras forgalom szerint rangsorolva epul fel; a
+`ranking_basis` mezobol egyertelmuen latszik, melyik rangsor ervenyes.
 
 A hirek alapbol a CoinDesk, a Decrypt es a Cointelegraph RSS-csatornaibol
 erkeznek, ezert kulon API-kulcs nelkul is mukodnek. A

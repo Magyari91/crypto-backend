@@ -38,6 +38,7 @@ def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
         "current_price": _number(coin.get("current_price")),
         "market_cap": _optional_number(coin.get("market_cap")),
         "market_cap_rank": coin.get("market_cap_rank"),
+        "quote_volume_24h": _optional_number(coin.get("quote_volume_24h")),
         "change_24h": _optional_number(coin.get("price_change_percentage_24h")),
         "change_7d": _optional_number(coin.get("price_change_percentage_7d_in_currency")),
         "high_24h": _optional_number(coin.get("high_24h")),

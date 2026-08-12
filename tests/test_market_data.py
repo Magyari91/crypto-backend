@@ -143,6 +143,7 @@ class BinanceMarketsService(MarketDataService):
                 "priceChangePercent": "2.4",
                 "highPrice": "65000",
                 "lowPrice": "62000",
+                "quoteVolume": "1000000",
             },
             {
                 "symbol": "ETHUSDT",
@@ -150,6 +151,15 @@ class BinanceMarketsService(MarketDataService):
                 "priceChangePercent": "-1.2",
                 "highPrice": "3600",
                 "lowPrice": "3400",
+                "quoteVolume": "2000000",
+            },
+            {
+                "symbol": "TESTUSDT",
+                "lastPrice": "0.5",
+                "priceChangePercent": "4.2",
+                "highPrice": "0.55",
+                "lowPrice": "0.45",
+                "quoteVolume": "500000",
             },
         ]
 
@@ -162,8 +172,22 @@ def test_supported_markets_normalizes_binance_tickers():
     assert [market["id"] for market in markets] == ["bitcoin", "ethereum"]
     assert markets[0]["current_price"] == "64500.5"
     assert markets[1]["price_change_percentage_24h"] == "-1.2"
-    assert "BTCUSDT" in service.params["symbols"]
-    assert "ADAUSDT" in service.params["symbols"]
+    assert service.params is None
+
+
+def test_market_catalog_ranks_all_usdt_pairs_by_quote_volume():
+    service = BinanceMarketsService()
+
+    markets = asyncio.run(service.market_catalog(limit=200))
+
+    assert [market["id"] for market in markets] == [
+        "ethereum",
+        "bitcoin",
+        "binance-test",
+    ]
+    assert [market["market_cap_rank"] for market in markets] == [1, 2, 3]
+    assert markets[0]["quote_volume_24h"] == 2_000_000
+    assert service.params is None
 
 
 class InvalidJsonResponse:

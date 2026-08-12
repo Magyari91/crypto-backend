@@ -1,5 +1,4 @@
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any
@@ -166,21 +165,77 @@ class MarketDataService:
             raise UpstreamServiceError("CoinGecko", "Unexpected markets response")
         return data
 
-    async def supported_markets(self) -> list[dict[str, Any]]:
-        pairs = [f"{symbol}USDT" for symbol in self.FORECAST_SYMBOLS.values()]
+    async def _binance_spot_tickers(self) -> list[dict[str, Any]]:
         data = await self._get_json(
             "Binance",
             f"{self.BINANCE_MARKET_URL}/ticker/24hr",
-            {"symbols": json.dumps(pairs, separators=(",", ":"))},
+            None,
             settings.market_cache_seconds,
         )
         if not isinstance(data, list):
             raise UpstreamServiceError("Binance", "Unexpected ticker response")
+        return [item for item in data if isinstance(item, dict)]
+
+    async def market_catalog(self, limit: int = 200) -> list[dict[str, Any]]:
+        data = await self._binance_spot_tickers()
+        analysis_by_symbol = {
+            symbol.upper(): (coin_id, self.FORECAST_NAMES[coin_id])
+            for coin_id, symbol in self.FORECAST_SYMBOLS.items()
+        }
+        leveraged_suffixes = ("UP", "DOWN", "BULL", "BEAR")
+        candidates = []
+        for ticker in data:
+            pair = str(ticker.get("symbol", "")).upper()
+            if not pair.endswith("USDT"):
+                continue
+            symbol = pair[:-4]
+            if not symbol or symbol.endswith(leveraged_suffixes):
+                continue
+            try:
+                quote_volume = float(ticker.get("quoteVolume", 0))
+                last_price = float(ticker.get("lastPrice", 0))
+            except (TypeError, ValueError):
+                continue
+            if quote_volume <= 0 or last_price <= 0:
+                continue
+            candidates.append((quote_volume, symbol, ticker))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        markets = []
+        for rank, (quote_volume, symbol, ticker) in enumerate(
+            candidates[: max(1, min(limit, 200))],
+            start=1,
+        ):
+            analysis_asset = analysis_by_symbol.get(symbol)
+            coin_id = analysis_asset[0] if analysis_asset else f"binance-{symbol.lower()}"
+            name = analysis_asset[1] if analysis_asset else symbol
+            markets.append(
+                {
+                    "id": coin_id,
+                    "symbol": symbol.lower(),
+                    "name": name,
+                    "image": None,
+                    "current_price": ticker.get("lastPrice"),
+                    "market_cap": None,
+                    "market_cap_rank": rank,
+                    "price_change_percentage_24h": ticker.get("priceChangePercent"),
+                    "price_change_percentage_7d_in_currency": None,
+                    "high_24h": ticker.get("highPrice"),
+                    "low_24h": ticker.get("lowPrice"),
+                    "quote_volume_24h": quote_volume,
+                    "sparkline_in_7d": {"price": []},
+                }
+            )
+        if not markets:
+            raise UpstreamServiceError("Binance", "No USDT spot ticker data")
+        return markets
+
+    async def supported_markets(self) -> list[dict[str, Any]]:
+        data = await self._binance_spot_tickers()
 
         tickers = {
             str(item.get("symbol", "")).upper(): item
             for item in data
-            if isinstance(item, dict)
         }
         markets = []
         for coin_id, symbol in self.FORECAST_SYMBOLS.items():

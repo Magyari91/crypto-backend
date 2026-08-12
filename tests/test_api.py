@@ -114,6 +114,27 @@ class FallbackMarketCatalogData(MarketCatalogData):
         ]
 
 
+class BinanceMarketCatalogData(FallbackMarketCatalogData):
+    def __init__(self):
+        super().__init__()
+        self.catalog_limit = None
+
+    async def market_catalog(self, limit=200):
+        self.catalog_limit = limit
+        return [
+            {
+                "id": "binance-test",
+                "symbol": "test",
+                "name": "TEST",
+                "current_price": "0.5",
+                "market_cap": None,
+                "market_cap_rank": 1,
+                "quote_volume_24h": 2_000_000,
+                "price_change_percentage_24h": "4.2",
+            }
+        ]
+
+
 def test_health_endpoint():
     with TestClient(app) as client:
         response = client.get("/health")
@@ -151,6 +172,7 @@ def test_market_catalog_returns_200_ready_normalized_rows():
     payload = response.json()
     assert service.market_request == {"per_page": 200, "sparkline": False}
     assert payload["source"] == "CoinGecko"
+    assert payload["ranking_basis"] == "market_cap"
     assert payload["partial"] is False
     assert payload["requested_limit"] == 200
     assert payload["count"] == 2
@@ -171,10 +193,27 @@ def test_market_catalog_falls_back_to_analysis_assets():
     assert response.status_code == 200
     payload = response.json()
     assert payload["source"] == "Binance Spot"
+    assert payload["ranking_basis"] == "analysis_assets"
     assert payload["partial"] is True
     assert payload["count"] == 1
     assert payload["items"][0]["id"] == "cardano"
     assert payload["items"][0]["analysis_available"] is True
+
+
+def test_market_catalog_uses_broad_binance_fallback_when_available():
+    service = BinanceMarketCatalogData()
+    with TestClient(app) as client:
+        app.state.market_data = service
+        response = client.get("/api/v1/markets?limit=200")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert service.catalog_limit == 200
+    assert payload["source"] == "Binance Spot"
+    assert payload["ranking_basis"] == "quote_volume_24h"
+    assert payload["partial"] is True
+    assert payload["items"][0]["quote_volume_24h"] == 2_000_000
+    assert payload["items"][0]["analysis_available"] is False
 
 
 def test_dashboard_rejects_unknown_coin_before_upstream_call():
