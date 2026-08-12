@@ -130,6 +130,7 @@ class BinanceMarketCatalogData(FallbackMarketCatalogData):
                 "market_cap": None,
                 "market_cap_rank": 1,
                 "quote_volume_24h": 2_000_000,
+                "price_source": "Binance Futures",
                 "price_change_percentage_24h": "4.2",
             }
         ]
@@ -209,10 +210,11 @@ def test_market_catalog_uses_broad_binance_fallback_when_available():
     assert response.status_code == 200
     payload = response.json()
     assert service.catalog_limit == 200
-    assert payload["source"] == "Binance Spot"
+    assert payload["source"] == "Binance Spot + Futures"
     assert payload["ranking_basis"] == "quote_volume_24h"
     assert payload["partial"] is True
     assert payload["items"][0]["quote_volume_24h"] == 2_000_000
+    assert payload["items"][0]["price_source"] == "Binance Futures"
     assert payload["items"][0]["analysis_available"] is False
 
 

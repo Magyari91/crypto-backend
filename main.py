@@ -506,7 +506,11 @@ async def markets(
         fallback_catalog = getattr(service, "market_catalog", None)
         if callable(fallback_catalog):
             data = await fallback_catalog(limit=limit)
-            source = "Binance Spot"
+            source = (
+                "Binance Spot + Futures"
+                if any(item.get("price_source") == "Binance Futures" for item in data)
+                else "Binance Spot"
+            )
             ranking_basis = "quote_volume_24h"
         else:
             data = await service.supported_markets()

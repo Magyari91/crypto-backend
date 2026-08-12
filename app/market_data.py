@@ -176,6 +176,17 @@ class MarketDataService:
             raise UpstreamServiceError("Binance", "Unexpected ticker response")
         return [item for item in data if isinstance(item, dict)]
 
+    async def _binance_futures_tickers(self) -> list[dict[str, Any]]:
+        data = await self._get_json(
+            "Binance Futures",
+            f"{self.BINANCE_FUTURES_URL}/fapi/v1/ticker/24hr",
+            None,
+            settings.market_cache_seconds,
+        )
+        if not isinstance(data, list):
+            raise UpstreamServiceError("Binance Futures", "Unexpected ticker response")
+        return [item for item in data if isinstance(item, dict)]
+
     async def market_catalog(self, limit: int = 200) -> list[dict[str, Any]]:
         data = await self._binance_spot_tickers()
         analysis_by_symbol = {
@@ -184,6 +195,7 @@ class MarketDataService:
         }
         leveraged_suffixes = ("UP", "DOWN", "BULL", "BEAR")
         candidates = []
+        spot_symbols = set()
         for ticker in data:
             pair = str(ticker.get("symbol", "")).upper()
             if not pair.endswith("USDT"):
@@ -198,11 +210,36 @@ class MarketDataService:
                 continue
             if quote_volume <= 0 or last_price <= 0:
                 continue
-            candidates.append((quote_volume, symbol, ticker))
+            spot_symbols.add(symbol)
+            candidates.append((quote_volume, symbol, ticker, "Binance Spot"))
+
+        missing_analysis_symbols = set(analysis_by_symbol) - spot_symbols
+        if missing_analysis_symbols:
+            try:
+                futures_tickers = await self._binance_futures_tickers()
+            except UpstreamServiceError:
+                futures_tickers = []
+            for ticker in futures_tickers:
+                pair = str(ticker.get("symbol", "")).upper()
+                if not pair.endswith("USDT"):
+                    continue
+                symbol = pair[:-4]
+                if symbol not in missing_analysis_symbols:
+                    continue
+                try:
+                    quote_volume = float(ticker.get("quoteVolume", 0))
+                    last_price = float(ticker.get("lastPrice", 0))
+                except (TypeError, ValueError):
+                    continue
+                if quote_volume <= 0 or last_price <= 0:
+                    continue
+                candidates.append(
+                    (quote_volume, symbol, ticker, "Binance Futures")
+                )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         markets = []
-        for rank, (quote_volume, symbol, ticker) in enumerate(
+        for rank, (quote_volume, symbol, ticker, price_source) in enumerate(
             candidates[: max(1, min(limit, 200))],
             start=1,
         ):
@@ -223,6 +260,7 @@ class MarketDataService:
                     "high_24h": ticker.get("highPrice"),
                     "low_24h": ticker.get("lowPrice"),
                     "quote_volume_24h": quote_volume,
+                    "price_source": price_source,
                     "sparkline_in_7d": {"price": []},
                 }
             )

@@ -35,7 +35,9 @@ legfeljebb 200 rangsorolt eszkozt ad vissza, mig modell- es hirhangulat-elemzes
 10 nagy, likvid, nem-stabil eszkozre keszul. Az API minden sornal jelzi az
 `analysis_available` allapotot. CoinGecko-kimaradas eseten a katalogus a
 Binance USDT spot parjaibol, 24 oras forgalom szerint rangsorolva epul fel; a
-`ranking_basis` mezobol egyertelmuen latszik, melyik rangsor ervenyes.
+spot piacon nem szereplo elemzesi eszkozt Binance USD-M futures ar egesziti ki.
+A `ranking_basis` es a soronkenti `price_source` mezobol egyertelmuen latszik,
+melyik rangsor es arforras ervenyes.
 
 A hirek alapbol a CoinDesk, a Decrypt es a Cointelegraph RSS-csatornaibol
 erkeznek, ezert kulon API-kulcs nelkul is mukodnek. A
