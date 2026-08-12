@@ -249,6 +249,9 @@ class BinanceMarketsService(MarketDataService):
             },
         ]
 
+    async def _hyperliquid_catalog_ticker(self, symbol):
+        raise UpstreamServiceError("Hyperliquid", "unavailable")
+
 
 def test_supported_markets_normalizes_binance_tickers():
     service = BinanceMarketsService()
@@ -305,6 +308,30 @@ def test_market_catalog_adds_missing_analysis_asset_from_futures():
     hype = next(market for market in markets if market["id"] == "hyperliquid")
     assert hype["current_price"] == "55.019"
     assert hype["price_source"] == "Binance Futures"
+    assert hype["market_cap_rank"] == 1
+
+
+class HyperliquidCatalogCoverageService(BinanceMarketsService):
+    async def _hyperliquid_catalog_ticker(self, symbol):
+        assert symbol == "HYPE"
+        return {
+            "symbol": "HYPEUSDT",
+            "lastPrice": 55.019,
+            "priceChangePercent": 1.25,
+            "highPrice": "56.1",
+            "lowPrice": "53.8",
+            "quoteVolume": 3_000_000,
+        }
+
+
+def test_market_catalog_prefers_hyperliquid_for_missing_hype_ticker():
+    service = HyperliquidCatalogCoverageService()
+
+    markets = asyncio.run(service.market_catalog(limit=200))
+
+    hype = next(market for market in markets if market["id"] == "hyperliquid")
+    assert hype["current_price"] == 55.019
+    assert hype["price_source"] == "Hyperliquid Perpetuals"
     assert hype["market_cap_rank"] == 1
 
 

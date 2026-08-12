@@ -136,6 +136,13 @@ class BinanceMarketCatalogData(FallbackMarketCatalogData):
         ]
 
 
+class HyperliquidMarketCatalogData(BinanceMarketCatalogData):
+    async def market_catalog(self, limit=200):
+        rows = await super().market_catalog(limit)
+        rows[0]["price_source"] = "Hyperliquid Perpetuals"
+        return rows
+
+
 def test_health_endpoint():
     with TestClient(app) as client:
         response = client.get("/health")
@@ -216,6 +223,15 @@ def test_market_catalog_uses_broad_binance_fallback_when_available():
     assert payload["items"][0]["quote_volume_24h"] == 2_000_000
     assert payload["items"][0]["price_source"] == "Binance Futures"
     assert payload["items"][0]["analysis_available"] is False
+
+
+def test_market_catalog_reports_hyperliquid_supplement_source():
+    with TestClient(app) as client:
+        app.state.market_data = HyperliquidMarketCatalogData()
+        response = client.get("/api/v1/markets?limit=200")
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "Binance Spot + Hyperliquid"
 
 
 def test_dashboard_rejects_unknown_coin_before_upstream_call():
