@@ -216,6 +216,29 @@ class MarketDataService:
             raise UpstreamServiceError("Binance Futures", "Unexpected ticker response")
         return data
 
+    async def _hyperliquid_catalog_ticker(self, symbol: str) -> dict[str, Any]:
+        rows = await self._hyperliquid_candles(symbol, "1d", 2)
+        if not rows:
+            raise UpstreamServiceError("Hyperliquid", "No current ticker data")
+        latest = rows[-1]
+        previous = rows[-2] if len(rows) >= 2 else latest
+        try:
+            current_price = float(latest["c"])
+            previous_close = float(previous["c"])
+            quote_volume = float(latest.get("v", 0.0)) * current_price
+        except (KeyError, TypeError, ValueError) as exc:
+            raise UpstreamServiceError("Hyperliquid", "Invalid ticker data") from exc
+        if min(current_price, previous_close, quote_volume) <= 0:
+            raise UpstreamServiceError("Hyperliquid", "Invalid ticker values")
+        return {
+            "symbol": f"{symbol}USDT",
+            "lastPrice": current_price,
+            "priceChangePercent": (current_price / previous_close - 1) * 100,
+            "highPrice": latest.get("h"),
+            "lowPrice": latest.get("l"),
+            "quoteVolume": quote_volume,
+        }
+
     async def market_catalog(self, limit: int = 200) -> list[dict[str, Any]]:
         data = await self._binance_spot_tickers()
         analysis_by_symbol = {
@@ -245,13 +268,18 @@ class MarketDataService:
         missing_analysis_symbols = (
             set(analysis_by_symbol) - spot_symbols
         ) & self.FUTURES_CATALOG_SYMBOLS
-        futures_tickers = []
+        supplemental_tickers = []
         for symbol in missing_analysis_symbols:
             try:
-                futures_tickers.append(await self._binance_futures_ticker(symbol))
+                ticker = await self._hyperliquid_catalog_ticker(symbol)
+                supplemental_tickers.append((ticker, "Hyperliquid Perpetuals"))
             except UpstreamServiceError:
-                continue
-        for ticker in futures_tickers:
+                try:
+                    ticker = await self._binance_futures_ticker(symbol)
+                    supplemental_tickers.append((ticker, "Binance Futures"))
+                except UpstreamServiceError:
+                    continue
+        for ticker, price_source in supplemental_tickers:
             pair = str(ticker.get("symbol", "")).upper()
             if not pair.endswith("USDT"):
                 continue
@@ -266,7 +294,7 @@ class MarketDataService:
             if quote_volume <= 0 or last_price <= 0:
                 continue
             candidates.append(
-                (quote_volume, symbol, ticker, "Binance Futures")
+                (quote_volume, symbol, ticker, price_source)
             )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
