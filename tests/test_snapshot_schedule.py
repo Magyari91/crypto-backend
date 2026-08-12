@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.assets import ANALYSIS_ASSETS
 from app.snapshot_schedule import SNAPSHOT_TARGETS, scheduled_snapshot_target
 
 
@@ -18,15 +19,11 @@ def test_snapshot_rotation_is_deterministic_and_advances_every_fifteen_minutes()
 def test_snapshot_rotation_covers_every_supported_coin_and_horizon():
     pairs = set(SNAPSHOT_TARGETS)
 
-    assert {target.coin for target in pairs} == {
-        "bitcoin",
-        "ethereum",
-        "solana",
-        "ripple",
-        "dogecoin",
-    }
+    assert {target.coin for target in pairs} == set(ANALYSIS_ASSETS)
     for coin in {target.coin for target in pairs}:
         assert {target.horizon for target in pairs if target.coin == coin} == {1, 7, 30}
+
+    assert len(SNAPSHOT_TARGETS) == 40
 
 
 def test_snapshot_rotation_rejects_naive_datetimes():

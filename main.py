@@ -17,6 +17,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.async_jobs import AsyncJobCache
+from app.assets import ANALYSIS_LIMIT, analysis_asset_list
 from app.backtest import evaluate_journal, walk_forward_backtest
 from app.cache import AsyncTTLCache
 from app.config import settings
@@ -25,6 +26,7 @@ from app.dashboard import (
     build_dashboard,
     build_indicator_summary,
     load_forecast_history,
+    normalize_market_rows,
     normalize_news,
 )
 from app.forecast import DIRECTION_THRESHOLDS, MODEL_VERSION
@@ -489,9 +491,33 @@ async def forecast_model_lab(
 
 
 @app.get("/api/v1/markets")
-async def markets(request: Request, limit: int = Query(default=20, ge=5, le=50)):
-    data = await market_service(request).markets(per_page=limit, sparkline=True)
-    return data
+async def markets(
+    request: Request,
+    response: Response,
+    limit: int = Query(default=200, ge=10, le=200),
+):
+    service = market_service(request)
+    source = "CoinGecko"
+    partial = False
+    try:
+        data = await service.markets(per_page=limit, sparkline=False)
+    except UpstreamServiceError:
+        data = await service.supported_markets()
+        source = "Binance Spot"
+        partial = True
+
+    rows = normalize_market_rows(data)
+    response.headers["Cache-Control"] = "public, max-age=120, stale-while-revalidate=600"
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "partial": partial,
+        "requested_limit": limit,
+        "count": len(rows),
+        "analysis_limit": ANALYSIS_LIMIT,
+        "analysis_assets": analysis_asset_list(),
+        "items": rows,
+    }
 
 
 @app.get("/api/v1/forecast/registry")

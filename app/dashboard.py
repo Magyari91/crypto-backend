@@ -2,18 +2,13 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from app.assets import ANALYSIS_ASSETS, analysis_asset_list
 from app.forecast import build_forecast, calculate_indicators
 from app.market_data import MarketDataService, UpstreamServiceError
 from app.news import aggregate_news_sentiment, normalize_articles
 
 
-SUPPORTED_COINS = {
-    "bitcoin": {"symbol": "BTC", "name": "Bitcoin"},
-    "ethereum": {"symbol": "ETH", "name": "Ethereum"},
-    "solana": {"symbol": "SOL", "name": "Solana"},
-    "ripple": {"symbol": "XRP", "name": "XRP"},
-    "dogecoin": {"symbol": "DOGE", "name": "Dogecoin"},
-}
+SUPPORTED_COINS = ANALYSIS_ASSETS
 FORECAST_HISTORY_DAYS = 2000
 
 
@@ -35,7 +30,7 @@ def _optional_number(value: Any) -> float | None:
 
 def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
     sparkline = coin.get("sparkline_in_7d", {}).get("price", [])
-    return {
+    row = {
         "id": coin.get("id"),
         "symbol": str(coin.get("symbol", "")).upper(),
         "name": coin.get("name"),
@@ -49,6 +44,16 @@ def _market_row(coin: dict[str, Any]) -> dict[str, Any]:
         "low_24h": _optional_number(coin.get("low_24h")),
         "sparkline": [round(_number(price), 8) for price in sparkline[-42:]],
     }
+    analysis_asset = SUPPORTED_COINS.get(str(row["id"]))
+    row["analysis_available"] = analysis_asset is not None
+    row["analysis_rank"] = (
+        analysis_asset.get("analysis_rank") if analysis_asset else None
+    )
+    return row
+
+
+def normalize_market_rows(coins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_market_row(coin) for coin in coins if coin.get("id")]
 
 
 def _enrich_market_from_chart(
@@ -170,7 +175,7 @@ async def build_dashboard(
     selected["forecast"]["data_source"] = chart.get("source", "CoinGecko")
     selected["forecast"]["history_days"] = len(chart.get("prices", []))
 
-    market_rows = [_market_row(coin) for coin in markets]
+    market_rows = normalize_market_rows(markets)
     valid_movers = [row for row in market_rows if row["change_24h"] is not None]
     sorted_movers = sorted(valid_movers, key=lambda row: row["change_24h"], reverse=True)
 
@@ -209,8 +214,6 @@ async def build_dashboard(
         },
         "watchlist": market_rows[:10],
         "news": news_rows[:6],
-        "supported_coins": [
-            {"id": coin_id, **metadata} for coin_id, metadata in SUPPORTED_COINS.items()
-        ],
+        "supported_coins": analysis_asset_list(),
         "disclaimer": "Kísérleti technikai piaci jelzés, nem pénzügyi tanács.",
     }

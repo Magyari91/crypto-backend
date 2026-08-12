@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import main
 from app.forecast_store import ForecastStore
+from app.market_data import UpstreamServiceError
 from main import app
 
 
@@ -65,6 +66,54 @@ class NewsMarketData:
         ]
 
 
+class MarketCatalogData:
+    def __init__(self):
+        self.market_request = None
+
+    async def markets(self, per_page=50, sparkline=True):
+        self.market_request = {"per_page": per_page, "sparkline": sparkline}
+        return [
+            {
+                "id": "bitcoin",
+                "symbol": "btc",
+                "name": "Bitcoin",
+                "current_price": 64_000,
+                "market_cap": 1_200_000_000_000,
+                "market_cap_rank": 1,
+                "price_change_percentage_24h": 1.5,
+                "price_change_percentage_7d_in_currency": 3.0,
+            },
+            {
+                "id": "tether",
+                "symbol": "usdt",
+                "name": "Tether",
+                "current_price": 1,
+                "market_cap": 180_000_000_000,
+                "market_cap_rank": 3,
+                "price_change_percentage_24h": 0.01,
+                "price_change_percentage_7d_in_currency": -0.01,
+            },
+        ]
+
+
+class FallbackMarketCatalogData(MarketCatalogData):
+    async def markets(self, per_page=50, sparkline=True):
+        raise UpstreamServiceError("CoinGecko", "rate limited")
+
+    async def supported_markets(self):
+        return [
+            {
+                "id": "cardano",
+                "symbol": "ada",
+                "name": "Cardano",
+                "current_price": "0.18",
+                "market_cap": None,
+                "market_cap_rank": None,
+                "price_change_percentage_24h": "1.2",
+            }
+        ]
+
+
 def test_health_endpoint():
     with TestClient(app) as client:
         response = client.get("/health")
@@ -80,11 +129,52 @@ def test_news_sentiment_endpoint_exposes_asset_context_and_articles():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["asset"] == {"id": "bitcoin", "symbol": "BTC", "name": "Bitcoin"}
+    assert payload["asset"] == {
+        "id": "bitcoin",
+        "symbol": "BTC",
+        "name": "Bitcoin",
+        "analysis_rank": 1,
+    }
     assert payload["sentiment"]["label"] == "positive"
     assert payload["sentiment"]["role"] == "context_only"
     assert payload["sentiment"]["forecast_weight_pct"] == 0.0
     assert payload["articles"][0]["sentiment"]["method"] == "vader_crypto_lexicon_v2"
+
+
+def test_market_catalog_returns_200_ready_normalized_rows():
+    service = MarketCatalogData()
+    with TestClient(app) as client:
+        app.state.market_data = service
+        response = client.get("/api/v1/markets?limit=200")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert service.market_request == {"per_page": 200, "sparkline": False}
+    assert payload["source"] == "CoinGecko"
+    assert payload["partial"] is False
+    assert payload["requested_limit"] == 200
+    assert payload["count"] == 2
+    assert payload["analysis_limit"] == 10
+    assert len(payload["analysis_assets"]) == 10
+    assert payload["items"][0]["analysis_available"] is True
+    assert payload["items"][0]["analysis_rank"] == 1
+    assert payload["items"][1]["analysis_available"] is False
+    assert payload["items"][1]["analysis_rank"] is None
+    assert "max-age=120" in response.headers["cache-control"]
+
+
+def test_market_catalog_falls_back_to_analysis_assets():
+    with TestClient(app) as client:
+        app.state.market_data = FallbackMarketCatalogData()
+        response = client.get("/api/v1/markets?limit=200")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "Binance Spot"
+    assert payload["partial"] is True
+    assert payload["count"] == 1
+    assert payload["items"][0]["id"] == "cardano"
+    assert payload["items"][0]["analysis_available"] is True
 
 
 def test_dashboard_rejects_unknown_coin_before_upstream_call():

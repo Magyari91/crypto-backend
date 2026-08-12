@@ -70,6 +70,24 @@ def test_normalize_cryptocompare_article():
     assert articles[0]["related_coin_ids"] == ["solana"]
 
 
+def test_news_relates_new_analysis_assets():
+    articles = normalize_articles(
+        [
+            {
+                "title": "BNB and Hyperliquid gain while Cardano holds",
+                "url": "https://example.test/expanded-assets",
+                "source": "Example",
+            }
+        ]
+    )
+
+    assert articles[0]["related_coin_ids"] == [
+        "binancecoin",
+        "hyperliquid",
+        "cardano",
+    ]
+
+
 def test_merge_deduplicates_and_keeps_sources_varied():
     articles = [
         {

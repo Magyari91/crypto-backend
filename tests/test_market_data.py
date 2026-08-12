@@ -163,6 +163,7 @@ def test_supported_markets_normalizes_binance_tickers():
     assert markets[0]["current_price"] == "64500.5"
     assert markets[1]["price_change_percentage_24h"] == "-1.2"
     assert "BTCUSDT" in service.params["symbols"]
+    assert "ADAUSDT" in service.params["symbols"]
 
 
 class InvalidJsonResponse:

@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 import httpx2
 
+from app.assets import ANALYSIS_ASSETS
 from app.cache import AsyncTTLCache
 from app.config import settings
 from app.derivatives import normalize_derivatives
@@ -36,18 +37,12 @@ class MarketDataService:
         "User-Agent": "Mozilla/5.0 (compatible; CryptoVision/2.0; +https://github.com/Magyari91/crypto-backend)",
     }
     FORECAST_SYMBOLS = {
-        "bitcoin": "BTC",
-        "ethereum": "ETH",
-        "solana": "SOL",
-        "ripple": "XRP",
-        "dogecoin": "DOGE",
+        coin_id: str(metadata["symbol"])
+        for coin_id, metadata in ANALYSIS_ASSETS.items()
     }
     FORECAST_NAMES = {
-        "bitcoin": "Bitcoin",
-        "ethereum": "Ethereum",
-        "solana": "Solana",
-        "ripple": "XRP",
-        "dogecoin": "Dogecoin",
+        coin_id: str(metadata["name"])
+        for coin_id, metadata in ANALYSIS_ASSETS.items()
     }
 
     def __init__(self):

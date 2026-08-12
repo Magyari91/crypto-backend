@@ -22,13 +22,18 @@ Az API dokumentacioja: `http://localhost:8000/docs`
 - `GET /api/v1/forecast/lab?coin=bitcoin&horizon=7` - igeny szerinti oras modelllabor
 - `GET /api/v1/forecast/registry?coin=bitcoin&horizon=7` - champion/challenger es feature-store allapot
 - `GET /api/v1/derivatives?coin=bitcoin` - funding, open interest es pozicionalasi kontextus
-- `GET /api/v1/markets` - piaci lista
+- `GET /api/v1/markets?limit=200` - legfeljebb 200 eszkozos, rangsorolt piaclista
 - `GET /api/v1/news` - friss hirek
 - `GET /api/v1/news/sentiment?coin=bitcoin` - eszkozspecifikus hirhangulat es auditadatok
 - `POST /api/v1/internal/snapshots/collect` - vedett, utemezett feature-snapshot gyujto
 
 A regi `/market-overview`, `/crypto-data`, `/crypto-news` es
 `/crypto-indicators` vegpontok az atallas idejere tovabbra is elerhetok.
+
+Az arfolyamkatalogus es az elorejelzesi kor kulon adatfolyam. A katalogus
+legfeljebb 200 rangsorolt eszkozt ad vissza, mig modell- es hirhangulat-elemzes
+10 nagy, likvid, nem-stabil eszkozre keszul. Az API minden sornal jelzi az
+`analysis_available` allapotot.
 
 A hirek alapbol a CoinDesk, a Decrypt es a Cointelegraph RSS-csatornaibol
 erkeznek, ezert kulon API-kulcs nelkul is mukodnek. A
