@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any
@@ -25,6 +26,7 @@ class MarketDataService:
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     BINANCE_MARKET_URL = "https://data-api.binance.vision/api/v3"
     BINANCE_FUTURES_URL = "https://fapi.binance.com"
+    HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
     FEAR_GREED_URL = "https://api.alternative.me/fng/"
     RSS_NEWS_FEEDS = (
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
@@ -120,6 +122,32 @@ class MarketDataService:
                 if len(response.content) > MAX_FEED_BYTES:
                     raise ValueError("Feed response is too large")
                 payload = response.content
+            except (httpx2.HTTPError, ValueError) as exc:
+                self._mark_upstream_unavailable(service)
+                raise UpstreamServiceError(service, str(exc)) from exc
+            self._mark_upstream_available(service)
+            return payload
+
+        return await self._cache.get_or_set(cache_key, cache_seconds, loader)
+
+    async def _post_json(
+        self,
+        service: str,
+        url: str,
+        body: dict[str, Any],
+        cache_seconds: int,
+    ) -> Any:
+        serialized_body = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        cache_key = f"post:{url}:{serialized_body}"
+
+        async def loader() -> Any:
+            if self._client is None:
+                raise RuntimeError("MarketDataService has not been started")
+            self._ensure_upstream_available(service)
+            try:
+                response = await self._client.post(url, json=body)
+                response.raise_for_status()
+                payload = response.json()
             except (httpx2.HTTPError, ValueError) as exc:
                 self._mark_upstream_unavailable(service)
                 raise UpstreamServiceError(service, str(exc)) from exc
@@ -311,6 +339,105 @@ class MarketDataService:
             {"vs_currency": "usd", "days": days},
             settings.chart_cache_seconds,
         )
+
+    async def _hyperliquid_candles(
+        self,
+        symbol: str,
+        interval: str,
+        points: int,
+    ) -> list[dict[str, Any]]:
+        interval_ms = {"1h": 3_600_000, "1d": 86_400_000}.get(interval)
+        if interval_ms is None:
+            raise UpstreamServiceError("Hyperliquid", "Unsupported candle interval")
+        requested_points = min(max(points, 1), 5000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        cache_bucket_ms = max(settings.chart_cache_seconds * 1000, 60_000)
+        end_time = now_ms - now_ms % cache_bucket_ms
+        start_time = end_time - (requested_points + 2) * interval_ms
+        data = await self._post_json(
+            "Hyperliquid",
+            self.HYPERLIQUID_INFO_URL,
+            {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": symbol,
+                    "interval": interval,
+                    "startTime": start_time,
+                    "endTime": end_time,
+                },
+            },
+            settings.chart_cache_seconds,
+        )
+        if not isinstance(data, list):
+            raise UpstreamServiceError("Hyperliquid", "Unexpected candle response")
+        rows = [row for row in data if isinstance(row, dict)]
+        return sorted(rows, key=lambda row: int(row.get("t", 0)))[-requested_points:]
+
+    async def _hyperliquid_history(
+        self,
+        symbol: str,
+        days: int,
+    ) -> dict[str, Any]:
+        requested_days = min(max(days, 61), 2000)
+        rows = await self._hyperliquid_candles(symbol, "1d", requested_days)
+        prices = []
+        volumes = []
+        for row in rows:
+            try:
+                timestamp = int(row["t"])
+                close = float(row["c"])
+                base_volume = float(row.get("v", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if close <= 0:
+                continue
+            prices.append([timestamp, close])
+            volumes.append([timestamp, max(base_volume * close, 0.0)])
+        if len(prices) < 61:
+            raise UpstreamServiceError("Hyperliquid", "Not enough historical data")
+        return {
+            "prices": prices,
+            "total_volumes": volumes,
+            "source": "Hyperliquid Perpetuals",
+        }
+
+    async def _hyperliquid_intraday_history(
+        self,
+        symbol: str,
+        hours: int,
+    ) -> dict[str, Any]:
+        requested_hours = min(max(hours, 720), 5000)
+        rows = await self._hyperliquid_candles(symbol, "1h", requested_hours)
+        candles = []
+        for row in rows:
+            try:
+                timestamp = int(row["t"])
+                open_price = float(row["o"])
+                high = float(row["h"])
+                low = float(row["l"])
+                close = float(row["c"])
+                base_volume = float(row.get("v", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if min(open_price, high, low, close) <= 0:
+                continue
+            candles.append(
+                {
+                    "timestamp": timestamp,
+                    "open": open_price,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": max(base_volume * close, 0.0),
+                }
+            )
+        if len(candles) < 720:
+            raise UpstreamServiceError("Hyperliquid", "Not enough hourly data")
+        return {
+            "candles": candles,
+            "source": "Hyperliquid Perpetuals",
+            "interval": "1h",
+        }
 
     def _binance_kline_config(self, symbol: str) -> tuple[str, str, str]:
         if symbol in self.FUTURES_CATALOG_SYMBOLS:
@@ -596,9 +723,17 @@ class MarketDataService:
         if symbol is None:
             raise UpstreamServiceError("Forecast history", "Unsupported forecast symbol")
 
+        async def load_history() -> dict[str, Any]:
+            if symbol in self.FUTURES_CATALOG_SYMBOLS:
+                try:
+                    return await self._hyperliquid_history(symbol, days)
+                except UpstreamServiceError:
+                    pass
+            return await self._binance_history(symbol, days)
+
         try:
             history, derivatives = await asyncio.gather(
-                self._binance_history(symbol, days),
+                load_history(),
                 self._binance_derivatives_history(symbol, days),
                 return_exceptions=True,
             )
@@ -635,6 +770,11 @@ class MarketDataService:
         symbol = self.FORECAST_SYMBOLS.get(coin)
         if symbol is None:
             raise UpstreamServiceError("Forecast history", "Unsupported forecast symbol")
+        if symbol in self.FUTURES_CATALOG_SYMBOLS:
+            try:
+                return await self._hyperliquid_intraday_history(symbol, hours)
+            except UpstreamServiceError:
+                pass
         return await self._binance_intraday_history(symbol, hours)
 
     async def news(self) -> list[dict[str, Any]]:

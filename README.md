@@ -55,8 +55,10 @@ HistGradientBoosting egy temporal Extra Trees modellel versenyez, 7 napra a
 regularizalt Logistic Regression es a HistGradientBoosting indul, 30 napra a
 kisebb fuggetlen mintaszam miatt csak a konzervativ Logistic Regression.
 
-A napi tanitas elsodlegesen a Binance nyilvanos USDT OHLCV adataibol legfeljebb
-2000 napot hasznal. Beallitott `CRYPTOCOMPARE_API_KEY` eseten a CryptoCompare
+A napi tanitas kilenc eszkoznel elsodlegesen a Binance nyilvanos USDT spot
+OHLCV adataibol legfeljebb 2000 napot hasznal. A HYPE idosora a Hyperliquid
+hivatalos `candleSnapshot` API-jabol erkezik, Binance USD-M futures
+tartalekkal. Beallitott `CRYPTOCOMPARE_API_KEY` eseten a CryptoCompare
 masodlagos forras lehet, vegso tartalek a CoinGecko 365 napos idosora.
 
 A korabbi mintak tanulo, kalibracios es erintetlen holdout szakaszra valnak
@@ -131,8 +133,10 @@ be; a jelenlegi oras Modelllabor ezt az osszehasonlitast kesziti elo.
 
 ## Oras modelllabor
 
-Az 1 es 7 napos tavhoz a backend igeny szerint 6480 darab Binance 1 oras OHLCV
-gyertyat is elemez. Az iranyjelolt Huber, Ridge es Huber Gradient Boosting kozul
+Az 1 es 7 napos tavhoz a backend igeny szerint legfeljebb 6480 darab egyoras
+OHLCV gyertyat is elemez. A HYPE eseteben a Hyperliquid API dokumentalt
+korlatja miatt legfeljebb 5000 gyertya hasznalhato. Az iranyjelolt Huber, Ridge
+es Huber Gradient Boosting kozul
 validacion valaszt, majd purged holdouton kapuz. A 80%-os mozgasi sav kulon
 kvantilismodellt hasznal, amelynek egy kedvezo holdout mellett harom korabbi
 idoablakbol legalabb kettoben is elonyt kell mutatnia.
@@ -166,10 +170,10 @@ Reszletek a
 
 ## Utemezett snapshot gyujtes
 
-A `.github/workflows/collect-snapshots.yml` workflow negyedkoronkent egyetlen
-erme/idotav part gyujt. Az otoras rotacio mind az ot tamogatott eszkozt es az
-1, 7, illetve 30 napos horizontot lefedi; a rovidebb BTC es ETH modellek surubb
-mintat kapnak. Az endpoint ugyanazt a dashboard- es modellfolyamatot hasznalja,
+A `.github/workflows/collect-snapshots.yml` workflow 15 percenkent egyetlen
+erme/idotav part gyujt. A 40 slotos rotacio mind a tiz tamogatott eszkozt es az
+1, 7, illetve 30 napos horizontot lefedi; a likvidebb modellek surubb mintat
+kapnak. Az endpoint ugyanazt a dashboard- es modellfolyamatot hasznalja,
 mint a normal felulet, majd deduplikalva rogzit elorejelzest es point-in-time
 feature snapshotot.
 

@@ -109,6 +109,66 @@ def test_hype_intraday_history_uses_binance_futures_klines():
     assert service.requests[0][1].endswith("/fapi/v1/klines")
 
 
+class HyperliquidHistoryService(MarketDataService):
+    def __init__(self):
+        self.requests = []
+
+    async def _post_json(self, service, url, body, cache_seconds):
+        self.requests.append((service, url, body))
+        interval = body["req"]["interval"]
+        count = 365 if interval == "1d" else 720
+        step = 86_400_000 if interval == "1d" else 3_600_000
+        return [
+            {
+                "t": index * step,
+                "T": (index + 1) * step - 1,
+                "o": "50.0",
+                "h": "52.0",
+                "l": "49.0",
+                "c": "51.0",
+                "v": "1000.0",
+            }
+            for index in range(count)
+        ]
+
+    async def _binance_history(self, symbol, days):
+        raise AssertionError("Hyperliquid history should be preferred for HYPE")
+
+    async def _binance_intraday_history(self, symbol, hours):
+        raise AssertionError("Hyperliquid intraday history should be preferred for HYPE")
+
+    async def _binance_derivatives_history(self, symbol, days):
+        return {"funding_rates": [], "snapshot": {"available": False}}
+
+
+def test_hype_forecast_history_prefers_official_hyperliquid_candles():
+    service = HyperliquidHistoryService()
+
+    history = asyncio.run(service.forecast_history("hyperliquid", days=365))
+
+    assert len(history["prices"]) == 365
+    assert history["total_volumes"][0][1] == 51_000.0
+    assert history["source"] == "Hyperliquid Perpetuals"
+    assert service.requests[0][0] == "Hyperliquid"
+    assert service.requests[0][1] == service.HYPERLIQUID_INFO_URL
+    assert service.requests[0][2]["type"] == "candleSnapshot"
+    assert service.requests[0][2]["req"]["coin"] == "HYPE"
+    assert service.requests[0][2]["req"]["interval"] == "1d"
+
+
+def test_hype_intraday_forecast_prefers_official_hyperliquid_candles():
+    service = HyperliquidHistoryService()
+
+    history = asyncio.run(
+        service.forecast_intraday_history("hyperliquid", hours=720)
+    )
+
+    assert len(history["candles"]) == 720
+    assert history["candles"][0]["volume"] == 51_000.0
+    assert history["source"] == "Hyperliquid Perpetuals"
+    assert service.requests[0][2]["req"]["interval"] == "1h"
+
+
 class BinanceDerivativesService(MarketDataService):
     def __init__(self):
         self.calls = []
