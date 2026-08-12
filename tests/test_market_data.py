@@ -190,6 +190,39 @@ def test_market_catalog_ranks_all_usdt_pairs_by_quote_volume():
     assert service.params is None
 
 
+class BinanceAnalysisCoverageService(BinanceMarketsService):
+    async def _get_json(self, service, url, params, cache_seconds, headers=None):
+        if "/fapi/" in url:
+            return [
+                {
+                    "symbol": "HYPEUSDT",
+                    "lastPrice": "55.019",
+                    "priceChangePercent": "0.133",
+                    "highPrice": "56.1",
+                    "lowPrice": "53.8",
+                    "quoteVolume": "3000000",
+                }
+            ]
+        return await super()._get_json(
+            service,
+            url,
+            params,
+            cache_seconds,
+            headers,
+        )
+
+
+def test_market_catalog_adds_missing_analysis_asset_from_futures():
+    service = BinanceAnalysisCoverageService()
+
+    markets = asyncio.run(service.market_catalog(limit=200))
+
+    hype = next(market for market in markets if market["id"] == "hyperliquid")
+    assert hype["current_price"] == "55.019"
+    assert hype["price_source"] == "Binance Futures"
+    assert hype["market_cap_rank"] == 1
+
+
 class InvalidJsonResponse:
     def raise_for_status(self):
         return None
