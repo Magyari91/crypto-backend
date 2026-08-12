@@ -187,22 +187,21 @@ def test_market_catalog_ranks_all_usdt_pairs_by_quote_volume():
     ]
     assert [market["market_cap_rank"] for market in markets] == [1, 2, 3]
     assert markets[0]["quote_volume_24h"] == 2_000_000
-    assert service.params is None
+    assert service.params == {"symbol": "HYPEUSDT"}
 
 
 class BinanceAnalysisCoverageService(BinanceMarketsService):
     async def _get_json(self, service, url, params, cache_seconds, headers=None):
         if "/fapi/" in url:
-            return [
-                {
-                    "symbol": "HYPEUSDT",
-                    "lastPrice": "55.019",
-                    "priceChangePercent": "0.133",
-                    "highPrice": "56.1",
-                    "lowPrice": "53.8",
-                    "quoteVolume": "3000000",
-                }
-            ]
+            assert params == {"symbol": "HYPEUSDT"}
+            return {
+                "symbol": "HYPEUSDT",
+                "lastPrice": "55.019",
+                "priceChangePercent": "0.133",
+                "highPrice": "56.1",
+                "lowPrice": "53.8",
+                "quoteVolume": "3000000",
+            }
         return await super()._get_json(
             service,
             url,
