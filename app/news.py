@@ -87,9 +87,14 @@ _BITCOIN_IMPROVEMENT_PROPOSAL = re.compile(
 _COIN_KEYWORDS = {
     "bitcoin": ("bitcoin", "btc"),
     "ethereum": ("ethereum", "ether", "eth"),
+    "binancecoin": ("bnb", "binance coin"),
     "solana": ("solana", "sol"),
     "ripple": ("ripple", "xrp"),
+    "tron": ("tron", "trx"),
+    "hyperliquid": ("hyperliquid", "hype"),
     "dogecoin": ("dogecoin", "doge"),
+    "zcash": ("zcash", "zec"),
+    "cardano": ("cardano", "ada"),
 }
 
 

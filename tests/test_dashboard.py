@@ -93,6 +93,8 @@ def test_dashboard_contract():
     assert payload["news_sentiment"]["sample_size"] == 1
     assert payload["selected"]["forecast"]["sentiment_context"] == payload["news_sentiment"]
     assert payload["news_sentiment"]["forecast_weight_pct"] == 0.0
+    assert len(payload["supported_coins"]) == 10
+    assert payload["supported_coins"][-1]["symbol"] == "ADA"
     assert "distribution_shift" in payload["selected"]["forecast"]["probability_forecast"]
 
 
