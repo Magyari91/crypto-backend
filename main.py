@@ -128,6 +128,12 @@ async def record_dashboard_forecast(
             model={
                 "model": forecast.get("model"),
                 "model_version": forecast.get("model_version"),
+                "expected_change_pct": forecast.get("expected_change_pct"),
+                "target_price": forecast.get("target_price"),
+                "direction_key": forecast.get("direction_key"),
+                "confidence": forecast.get("confidence"),
+                "prediction_interval": forecast.get("prediction_interval", {}),
+                "ensemble": forecast.get("ensemble", {}),
                 "specialist": forecast.get("specialist", {}),
                 "probability": forecast.get("probability_forecast", {}),
             },
@@ -349,11 +355,17 @@ async def forecast_analytics(
         selected_coin,
         horizon,
     )
-    chart, benchmark_chart, history, feature_status = await asyncio.gather(
+    live_performance_task = asyncio.to_thread(
+        store.performance_summary,
+        selected_coin,
+        horizon,
+    )
+    chart, benchmark_chart, history, feature_status, live_performance = await asyncio.gather(
         chart_task,
         benchmark_task,
         history_task,
         feature_status_task,
+        live_performance_task,
     )
     benchmark_chart = chart if benchmark_chart is None else benchmark_chart
     prices = chart.get("prices", [])
@@ -411,6 +423,7 @@ async def forecast_analytics(
             store.storage_status(),
             horizon,
         ),
+        "live_performance": live_performance,
         "disclaimer": "A múltbeli eredmény nem garantálja a jövőbeli teljesítményt.",
     }
     if job_status.state != "ready":
@@ -556,6 +569,11 @@ async def forecast_registry(
         selected_coin,
         horizon,
     )
+    live_performance = await asyncio.to_thread(
+        journal_store(request).performance_summary,
+        selected_coin,
+        horizon,
+    )
     storage = journal_store(request).storage_status()
     return {
         "model_version": MODEL_VERSION,
@@ -570,6 +588,7 @@ async def forecast_registry(
             storage,
             horizon,
         ),
+        "live_performance": live_performance,
         "activation_policy": (
             "A challenger csak pozitív validációs és érintetlen holdout-előny, "
             "stabil idősávok, elfogadható kalibráció és alacsony eloszláseltolódás "

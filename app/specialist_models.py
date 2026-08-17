@@ -4,7 +4,7 @@ from math import isfinite
 from statistics import mean, stdev
 from typing import Any
 
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor
 from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -19,6 +19,7 @@ class SpecialistSpec:
     key: str
     label: str
     family: str
+    candidates: tuple[str, ...]
     min_samples: int
     max_training_samples: int
     refit_days: int
@@ -31,8 +32,9 @@ class SpecialistSpec:
 SPECIALIST_REGISTRY = {
     1: SpecialistSpec(
         key="huber_1d",
-        label="Robusztus 1 napos modell",
-        family="Huber regresszió",
+        label="1 napos modellverseny",
+        family="Huber / Gradient Boosting / Extra Trees",
+        candidates=("huber", "gradient_boosting", "extra_trees"),
         min_samples=100,
         max_training_samples=900,
         refit_days=7,
@@ -43,8 +45,9 @@ SPECIALIST_REGISTRY = {
     ),
     7: SpecialistSpec(
         key="gradient_boosting_7d",
-        label="Nemlineáris 7 napos modell",
-        family="Huber Gradient Boosting",
+        label="7 napos modellverseny",
+        family="Gradient Boosting / Extra Trees / Huber",
+        candidates=("gradient_boosting", "extra_trees", "huber"),
         min_samples=140,
         max_training_samples=900,
         refit_days=14,
@@ -55,8 +58,9 @@ SPECIALIST_REGISTRY = {
     ),
     30: SpecialistSpec(
         key="ridge_30d",
-        label="Regularizált 30 napos trendmodell",
-        family="Ridge regresszió",
+        label="30 napos modellverseny",
+        family="Ridge / Gradient Boosting / Extra Trees",
+        candidates=("ridge", "gradient_boosting", "extra_trees"),
         min_samples=180,
         max_training_samples=900,
         refit_days=30,
@@ -65,6 +69,14 @@ SPECIALIST_REGISTRY = {
         minimum_skill_pct=1.0,
         maximum_blend_weight=0.65,
     ),
+}
+
+
+CANDIDATE_FAMILIES = {
+    "huber": "Huber regresszió",
+    "ridge": "Ridge regresszió",
+    "gradient_boosting": "Huber Gradient Boosting",
+    "extra_trees": "Regularizált Extra Trees",
 }
 
 
@@ -125,15 +137,19 @@ class SpecialistState:
     estimator: Any | None
     active: bool
     available: bool
+    selected_model_key: str | None
+    selected_model_family: str | None
     shrinkage: float
     blend_weight: float
     training_samples: int
     holdout_samples: int
     validation_skill_pct: float
+    holdout_skill_pct: float
     holdout_directional_accuracy: float | None
     holdout_signal_coverage_pct: float
     residuals: list[float]
     top_features: list[dict[str, Any]]
+    validation_candidates: list[dict[str, Any]]
     reason: str
 
 
@@ -274,8 +290,8 @@ def prepare_specialist_data(
     )
 
 
-def _make_estimator(horizon_days: int):
-    if horizon_days == 1:
+def _make_estimator(model_key: str, horizon_days: int):
+    if model_key == "huber":
         return Pipeline(
             [
                 ("scale", StandardScaler()),
@@ -290,22 +306,33 @@ def _make_estimator(horizon_days: int):
                 ),
             ]
         )
-    if horizon_days == 7:
+    if model_key == "gradient_boosting":
         return GradientBoostingRegressor(
             loss="huber",
-            n_estimators=90,
-            learning_rate=0.035,
+            n_estimators=100 if horizon_days == 7 else 80,
+            learning_rate=0.035 if horizon_days == 7 else 0.03,
             max_depth=2,
             min_samples_leaf=12,
             subsample=0.85,
             random_state=42,
         )
-    return Pipeline(
-        [
-            ("scale", StandardScaler()),
-            ("regressor", Ridge(alpha=24.0)),
-        ]
-    )
+    if model_key == "extra_trees":
+        return ExtraTreesRegressor(
+            n_estimators=96,
+            max_depth=5,
+            min_samples_leaf=8,
+            max_features=0.75,
+            random_state=42,
+            n_jobs=1,
+        )
+    if model_key == "ridge":
+        return Pipeline(
+            [
+                ("scale", StandardScaler()),
+                ("regressor", Ridge(alpha=24.0)),
+            ]
+        )
+    raise ValueError(f"Ismeretlen specialista modelljelölt: {model_key}")
 
 
 def _fit_estimator(estimator, features: list[list[float]], targets: list[float]):
@@ -369,15 +396,19 @@ def _empty_state(
         estimator=None,
         active=False,
         available=False,
+        selected_model_key=None,
+        selected_model_family=None,
         shrinkage=0.0,
         blend_weight=0.0,
         training_samples=training_samples,
         holdout_samples=0,
         validation_skill_pct=0.0,
+        holdout_skill_pct=0.0,
         holdout_directional_accuracy=None,
         holdout_signal_coverage_pct=0.0,
         residuals=[],
         top_features=[],
+        validation_candidates=[],
         reason=reason,
     )
 
@@ -414,27 +445,74 @@ def train_specialist(
     if core_end < 50:
         return _empty_state(spec, len(origins), "Nincs elég régi minta a háromrészes validációhoz.")
 
-    calibration_model = _fit_estimator(
-        _make_estimator(prepared.horizon_days),
-        features[:core_end],
-        fit_targets[:core_end],
-    )
-    calibration_predictions = _predict(
-        calibration_model,
-        features[core_end:training_end],
-        spec,
-    )
     calibration_actual = actual_targets[core_end:training_end]
-    shrinkage = min(
-        SHRINKAGE_CANDIDATES,
-        key=lambda candidate: _mae(
-            calibration_actual,
-            [prediction * candidate for prediction in calibration_predictions],
-        ),
+    calibration_baseline_mae = _mae(
+        calibration_actual,
+        [0.0] * len(calibration_actual),
     )
+    candidate_results = []
+    for candidate_key in spec.candidates:
+        calibration_model = _fit_estimator(
+            _make_estimator(candidate_key, prepared.horizon_days),
+            features[:core_end],
+            fit_targets[:core_end],
+        )
+        calibration_predictions = _predict(
+            calibration_model,
+            features[core_end:training_end],
+            spec,
+        )
+        candidate_shrinkage = min(
+            SHRINKAGE_CANDIDATES,
+            key=lambda candidate: _mae(
+                calibration_actual,
+                [prediction * candidate for prediction in calibration_predictions],
+            ),
+        )
+        candidate_mae = _mae(
+            calibration_actual,
+            [prediction * candidate_shrinkage for prediction in calibration_predictions],
+        )
+        candidate_skill = (
+            (calibration_baseline_mae - candidate_mae)
+            / calibration_baseline_mae
+            * 100
+            if calibration_baseline_mae > 0
+            else 0.0
+        )
+        candidate_results.append(
+            {
+                "key": candidate_key,
+                "family": CANDIDATE_FAMILIES[candidate_key],
+                "mae_pct": candidate_mae,
+                "baseline_mae_pct": calibration_baseline_mae,
+                "skill_vs_baseline_pct": candidate_skill,
+                "shrinkage": candidate_shrinkage,
+            }
+        )
+
+    selected_candidate = min(candidate_results, key=lambda item: item["mae_pct"])
+    selected_model_key = str(selected_candidate["key"])
+    selected_model_family = str(selected_candidate["family"])
+    shrinkage = float(selected_candidate["shrinkage"])
+    validation_skill_pct = float(selected_candidate["skill_vs_baseline_pct"])
+    validation_candidates = [
+        {
+            **item,
+            "mae_pct": round(float(item["mae_pct"]), 4),
+            "baseline_mae_pct": round(float(item["baseline_mae_pct"]), 4),
+            "skill_vs_baseline_pct": round(
+                float(item["skill_vs_baseline_pct"]),
+                2,
+            ),
+            "shrinkage": round(float(item["shrinkage"]), 2),
+            "selected": item["key"] == selected_model_key,
+        }
+        for item in candidate_results
+    ]
 
     holdout_model = _fit_estimator(
-        _make_estimator(prepared.horizon_days),
+        _make_estimator(selected_model_key, prepared.horizon_days),
         features[:training_end],
         fit_targets[:training_end],
     )
@@ -446,7 +524,7 @@ def train_specialist(
     holdout_actual = actual_targets[training_end:]
     baseline_mae = _mae(holdout_actual, [0.0] * len(holdout_actual))
     model_mae = _mae(holdout_actual, holdout_predictions)
-    skill_pct = (
+    holdout_skill_pct = (
         (baseline_mae - model_mae) / baseline_mae * 100
         if baseline_mae > 0
         else 0.0
@@ -466,22 +544,27 @@ def train_specialist(
     minimum_active_samples = max(4, round(len(holdout_actual) * 0.05))
     active = (
         shrinkage > 0
-        and skill_pct >= spec.minimum_skill_pct
+        and validation_skill_pct > 0
+        and holdout_skill_pct >= spec.minimum_skill_pct
         and len(active_pairs) >= minimum_active_samples
         and active_accuracy is not None
         and active_accuracy >= 52.0
     )
 
     if active:
-        reason = "A specialista a külön tesztszakaszon felülteljesítette a semleges alapmodellt."
+        reason = (
+            f"A {selected_model_family} nyerte a validációs versenyt, majd a "
+            "külön holdouton is felülteljesítette a semleges alapmodellt."
+        )
         estimator = _fit_estimator(
-            _make_estimator(prepared.horizon_days),
+            _make_estimator(selected_model_key, prepared.horizon_days),
             features,
             fit_targets,
         )
         blend_weight = min(
             spec.maximum_blend_weight,
-            0.35 + max(skill_pct, 0.0) / 25,
+            0.35
+            + max(min(validation_skill_pct, holdout_skill_pct), 0.0) / 25,
         )
         top_features = _feature_importance(estimator)
     else:
@@ -490,8 +573,10 @@ def train_specialist(
         top_features = diagnostic_features
         if shrinkage == 0:
             reason = "A validáció szerint a semleges becslés volt pontosabb."
-        elif skill_pct < spec.minimum_skill_pct:
-            reason = "A specialista előnye még nem érte el a bekapcsolási küszöböt."
+        elif validation_skill_pct <= 0:
+            reason = "Egyik modelljelölt sem javított a validációs alapmodellen."
+        elif holdout_skill_pct < spec.minimum_skill_pct:
+            reason = "A validációs győztes holdout-előnye még nem érte el a bekapcsolási küszöböt."
         elif len(active_pairs) < minimum_active_samples:
             reason = "A specialista még túl kevés aktív jelzést adott."
         else:
@@ -506,17 +591,21 @@ def train_specialist(
         estimator=estimator,
         active=active,
         available=True,
+        selected_model_key=selected_model_key,
+        selected_model_family=selected_model_family,
         shrinkage=shrinkage,
         blend_weight=blend_weight,
         training_samples=len(origins),
         holdout_samples=len(holdout_actual),
-        validation_skill_pct=round(skill_pct, 2),
+        validation_skill_pct=round(validation_skill_pct, 2),
+        holdout_skill_pct=round(holdout_skill_pct, 2),
         holdout_directional_accuracy=(
             round(active_accuracy, 2) if active_accuracy is not None else None
         ),
         holdout_signal_coverage_pct=round(coverage, 2),
         residuals=residuals,
         top_features=top_features,
+        validation_candidates=validation_candidates,
         reason=reason,
     )
 
@@ -539,9 +628,14 @@ def specialist_estimate_from_state(
         state.spec.point_limit,
     )
     return {
-        "key": state.spec.key,
+        "key": (
+            f"{state.selected_model_key}_{state.spec.key.rsplit('_', 1)[-1]}"
+            if state.selected_model_key
+            else state.spec.key
+        ),
         "label": state.spec.label,
-        "family": state.spec.family,
+        "family": state.selected_model_family or state.spec.family,
+        "selected_model_key": state.selected_model_key,
         "available": state.available,
         "active": state.active,
         "prediction_pct": round(prediction, 4),
@@ -550,9 +644,11 @@ def specialist_estimate_from_state(
         "training_samples": state.training_samples,
         "holdout_samples": state.holdout_samples,
         "validation_skill_pct": state.validation_skill_pct,
+        "holdout_skill_pct": state.holdout_skill_pct,
         "holdout_directional_accuracy": state.holdout_directional_accuracy,
         "holdout_signal_coverage_pct": state.holdout_signal_coverage_pct,
         "top_features": state.top_features,
+        "validation_candidates": state.validation_candidates,
         "residuals": state.residuals,
         "reason": state.reason,
         "refit_days": state.spec.refit_days,
@@ -610,6 +706,10 @@ def specialist_registry_payload() -> list[dict[str, Any]]:
             "key": spec.key,
             "label": spec.label,
             "family": spec.family,
+            "candidates": [
+                {"key": key, "family": CANDIDATE_FAMILIES[key]}
+                for key in spec.candidates
+            ],
             "minimum_samples": spec.min_samples,
             "refit_days": spec.refit_days,
         }

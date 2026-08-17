@@ -43,9 +43,10 @@ A hirek alapbol a CoinDesk, a Decrypt es a Cointelegraph RSS-csatornaibol
 erkeznek, ezert kulon API-kulcs nelkul is mukodnek. A
 `CRYPTOCOMPARE_API_KEY` opcionakent egy tovabbi hirforrast kapcsol be.
 
-Az elorejelzes kiserleti, kalibralt horizont-specialista ensemble v5. Az 1 napos tavhoz
-kiugro ertekekre robusztus Huber regresszio, a 7 napos tavhoz nemlinearis Huber
-Gradient Boosting, a 30 napos tavhoz regularizalt Ridge regresszio tartozik.
+Az elorejelzes kiserleti, kalibralt horizont-specialista ensemble v5.1. Az 1
+napos tavon a Huber regresszio, a Huber Gradient Boosting es az Extra Trees, 7
+napra a Gradient Boosting, az Extra Trees es a Huber, 30 napra pedig a Ridge, a
+Gradient Boosting es az Extra Trees versenyez.
 Mindharom csak multbeli ar-, trend-, volatilitas-, RSI-, forgalmi es funding
 jellemzoket hasznal. A napi hozamok 2-7 napos lagjei kulon temporal feature
 formajaban kerulnek be. A technikai v2 modell biztonsagi tartalekkent megmaradt.
@@ -61,11 +62,12 @@ hivatalos `candleSnapshot` API-jabol erkezik, Binance USD-M futures
 tartalekkal. Beallitott `CRYPTOCOMPARE_API_KEY` eseten a CryptoCompare
 masodlagos forras lehet, vegso tartalek a CoinGecko 365 napos idosora.
 
-A korabbi mintak tanulo, kalibracios es erintetlen holdout szakaszra valnak
-szet. A specialista csak akkor kap sulyt, ha a holdouton felulteljesiti a
-valtozatlan arat feltetelezo alapmodellt, eleg aktiv jelzest ad, es azok
-iranytalalati aranya is eleri a kuszobot. Bizonyitott elony nelkul a v5 a
-korabbi technikai modellnel marad. A `confidence` visszamert jelminosegi
+A korabbi mintak tanulo, modellvalaszto validacios es erintetlen holdout
+szakaszra valnak szet. A specialista algoritmusat csak a validacios szakasz
+valasztja ki. A gyoztes csak akkor kap sulyt, ha a kulon holdouton is
+felulteljesiti a valtozatlan arat feltetelezo alapmodellt, eleg aktiv jelzest
+ad, es azok iranytalalati aranya is eleri a kuszobot. Bizonyitott elony nelkul
+a v5.1 a korabbi technikai modellnel marad. A `confidence` visszamert jelminosegi
 pontszam, nem jovobeli valoszinuseg.
 
 A v5 kulon, pontosan definialt esemenyvaloszinuseget is becsul:
@@ -93,7 +95,8 @@ modszert hasznal: minden tortenelmi tesztpont csak a korabban mar elerheto
 arfolyamadatokat latja. Az eredmenyt a valtozatlan arat feltetelezo
 alapmodellel es a specialista nelkuli v2 technikai modellel is osszehasonlitja.
 Az uj naplobejegyzesek az esemenyvaloszinuseget, az alapeselyt, a celhozamot es
-a valoszinusegi kapu allapotat is taroljak.
+a valoszinusegi kapu allapotat is taroljak. A v5.1 a teljes publikus becslest,
+az iranyt es a 80%-os intervallumot is a point-in-time snapshothoz koti.
 
 Ugyanebbe az adatbazisba valtoztathatatlan point-in-time feature snapshot is
 kerul: piaci allapot, technikai mutatok, Binance USD-M futures kontextus,
@@ -117,6 +120,11 @@ inditja, es `202 pending` allapottal kerheto le ujra. A dashboard 60 lezart
 pontot es legfeljebb 60 napos refit-suruseget hasznal a gyors auditban; a
 parancssori benchmark megtartja a reszletesebb beallitasokat. A riport a
 publikus modell es a tartalekban levo challenger meroszamat kulon mutatja.
+Az `live_performance` blokk ettol fuggetlenul csak a tenylegesen publikalt es
+mar lejart elorejelzeseket meri 7, 30 es 90 napos ablakban. MAE-t, RMSE-t,
+semleges alapmodellhez viszonyitott skillt, aktiv iranytalalatot, intervallum-
+lefedettseget es Brier-score-t kozol; keves mintanal `collecting` allapotban
+marad.
 
 A teljes napi valoszinusegi benchmark megismetelheto:
 
@@ -167,6 +175,12 @@ Alternativa egy csatolt persistent disk es azon beluli utvonal, peldaul
 automatikusan, mert csak tamogatott, fizetos szolgaltatasi csomaghoz adhato.
 Reszletek a
 [Render persistent disk dokumentaciojaban](https://render.com/docs/disks) vannak.
+
+Folyamatos eles uzemhez az ajanlott minimum egy mindig aktiv backend es egy
+fizetos Render Postgres ugyanabban a regioban. A Render ingyenes PostgreSQL
+peldanya 30 nap utan lejar, ezert csak atmeneti tesztre alkalmas. A legkisebb
+eles konfiguracio beallitasa elott erdemes kulon koltsegkeretet jovahagyni,
+majd a belso kapcsolatot `FORECAST_DATABASE_URL` neven megadni.
 
 ## Utemezett snapshot gyujtes
 

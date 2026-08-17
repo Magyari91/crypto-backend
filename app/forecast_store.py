@@ -1,5 +1,7 @@
 import json
+from math import sqrt
 import sqlite3
+from statistics import mean
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -7,6 +9,9 @@ from typing import Any
 
 JOURNAL_BUCKET_MINUTES = 15
 FEATURE_SNAPSHOT_VERSION = "1.0.0"
+LIVE_PERFORMANCE_WINDOWS = (7, 30, 90)
+MINIMUM_LIVE_PERFORMANCE_SAMPLES = 20
+PERFORMANCE_DIRECTION_THRESHOLDS = {1: 0.20, 7: 0.75, 30: 1.50}
 
 
 def _utc_datetime(value: str) -> datetime:
@@ -14,6 +19,152 @@ def _utc_datetime(value: str) -> datetime:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp.astimezone(timezone.utc)
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _direction_key(value: float, horizon_days: int) -> str:
+    threshold = PERFORMANCE_DIRECTION_THRESHOLDS[horizon_days]
+    if value > threshold:
+        return "bullish"
+    if value < -threshold:
+        return "bearish"
+    return "neutral"
+
+
+def _performance_metrics(
+    records: list[dict[str, Any]],
+    horizon_days: int,
+) -> dict[str, Any]:
+    samples = len(records)
+    if not samples:
+        return {
+            "status": "collecting",
+            "samples": 0,
+            "minimum_samples": MINIMUM_LIVE_PERFORMANCE_SAMPLES,
+            "from": None,
+            "to": None,
+            "mae_pct": None,
+            "rmse_pct": None,
+            "baseline_mae_pct": None,
+            "skill_vs_baseline_pct": None,
+            "directional_accuracy_pct": None,
+            "active_directional_accuracy_pct": None,
+            "signal_coverage_pct": None,
+            "interval_coverage_pct": None,
+            "interval_samples": 0,
+            "probability": None,
+        }
+
+    absolute_errors = [
+        abs(item["expected_change_pct"] - item["realized_return_pct"])
+        for item in records
+    ]
+    baseline_errors = [abs(item["realized_return_pct"]) for item in records]
+    mae = mean(absolute_errors)
+    baseline_mae = mean(baseline_errors)
+    skill = (
+        (baseline_mae - mae) / baseline_mae * 100
+        if baseline_mae > 0
+        else 0.0
+    )
+    direction_hits = [
+        item["predicted_direction"]
+        == _direction_key(item["realized_return_pct"], horizon_days)
+        for item in records
+    ]
+    active = [item for item in records if item["predicted_direction"] != "neutral"]
+    active_hits = [
+        item["predicted_direction"]
+        == _direction_key(item["realized_return_pct"], horizon_days)
+        for item in active
+    ]
+    interval_records = [
+        item
+        for item in records
+        if item["lower_change_pct"] is not None
+        and item["upper_change_pct"] is not None
+    ]
+    interval_coverage = (
+        mean(
+            item["lower_change_pct"]
+            <= item["realized_return_pct"]
+            <= item["upper_change_pct"]
+            for item in interval_records
+        )
+        * 100
+        if interval_records
+        else None
+    )
+    probability_records = [
+        item
+        for item in records
+        if item["event_happened"] is not None
+        and item["event_probability"] is not None
+    ]
+    probability = None
+    if probability_records:
+        brier = mean(
+            (item["event_probability"] - int(item["event_happened"])) ** 2
+            for item in probability_records
+        )
+        baseline_rows = [
+            item
+            for item in probability_records
+            if item["baseline_probability"] is not None
+        ]
+        baseline_brier = (
+            mean(
+                (item["baseline_probability"] - int(item["event_happened"])) ** 2
+                for item in baseline_rows
+            )
+            if baseline_rows
+            else None
+        )
+        brier_skill = (
+            (baseline_brier - brier) / baseline_brier * 100
+            if baseline_brier is not None and baseline_brier > 0
+            else None
+        )
+        probability = {
+            "samples": len(probability_records),
+            "brier_score": round(brier, 4),
+            "baseline_brier_score": (
+                round(baseline_brier, 4) if baseline_brier is not None else None
+            ),
+            "brier_skill_pct": (
+                round(brier_skill, 2) if brier_skill is not None else None
+            ),
+        }
+
+    return {
+        "status": (
+            "ready" if samples >= MINIMUM_LIVE_PERFORMANCE_SAMPLES else "collecting"
+        ),
+        "samples": samples,
+        "minimum_samples": MINIMUM_LIVE_PERFORMANCE_SAMPLES,
+        "from": min(item["observed_at"] for item in records).isoformat(),
+        "to": max(item["observed_at"] for item in records).isoformat(),
+        "mae_pct": round(mae, 4),
+        "rmse_pct": round(sqrt(mean(error**2 for error in absolute_errors)), 4),
+        "baseline_mae_pct": round(baseline_mae, 4),
+        "skill_vs_baseline_pct": round(skill, 2),
+        "directional_accuracy_pct": round(mean(direction_hits) * 100, 2),
+        "active_directional_accuracy_pct": (
+            round(mean(active_hits) * 100, 2) if active_hits else None
+        ),
+        "signal_coverage_pct": round(len(active) / samples * 100, 2),
+        "interval_coverage_pct": (
+            round(interval_coverage, 2) if interval_coverage is not None else None
+        ),
+        "interval_samples": len(interval_records),
+        "probability": probability,
+    }
 
 
 class ForecastStore:
@@ -550,6 +701,97 @@ class ForecastStore:
                 json.loads(latest["news_sentiment_json"]) if latest else None
             ),
             "latest_model": json.loads(latest["model_json"]) if latest else None,
+        }
+
+    def performance_summary(
+        self,
+        coin_id: str,
+        horizon_days: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        current_time = current_time.astimezone(timezone.utc)
+
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT
+                    snapshot.generated_at,
+                    snapshot.model_json,
+                    outcome.observed_at,
+                    outcome.realized_return_pct,
+                    outcome.event_happened
+                FROM feature_outcome AS outcome
+                JOIN feature_snapshot AS snapshot
+                    ON snapshot.id = outcome.feature_snapshot_id
+                WHERE snapshot.coin_id = ? AND snapshot.horizon_days = ?
+                ORDER BY outcome.observed_at
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchall()
+
+        records = []
+        for row in rows:
+            model = json.loads(row["model_json"])
+            expected_change = _optional_float(model.get("expected_change_pct"))
+            realized_return = _optional_float(row["realized_return_pct"])
+            if expected_change is None or realized_return is None:
+                continue
+            observed_at = _utc_datetime(row["observed_at"])
+            if observed_at > current_time:
+                continue
+            interval = model.get("prediction_interval") or {}
+            probability = model.get("probability") or {}
+            probability_pct = _optional_float(probability.get("probability_pct"))
+            baseline_probability_pct = _optional_float(
+                probability.get("baseline_probability_pct")
+            )
+            records.append(
+                {
+                    "observed_at": observed_at,
+                    "expected_change_pct": expected_change,
+                    "realized_return_pct": realized_return,
+                    "predicted_direction": (
+                        model.get("direction_key")
+                        or _direction_key(expected_change, int(horizon_days))
+                    ),
+                    "lower_change_pct": _optional_float(
+                        interval.get("lower_change_pct")
+                    ),
+                    "upper_change_pct": _optional_float(
+                        interval.get("upper_change_pct")
+                    ),
+                    "event_happened": row["event_happened"],
+                    "event_probability": (
+                        probability_pct / 100 if probability_pct is not None else None
+                    ),
+                    "baseline_probability": (
+                        baseline_probability_pct / 100
+                        if baseline_probability_pct is not None
+                        else None
+                    ),
+                }
+            )
+
+        windows = []
+        for days in LIVE_PERFORMANCE_WINDOWS:
+            cutoff = current_time - timedelta(days=days)
+            window_records = [item for item in records if item["observed_at"] >= cutoff]
+            windows.append({"days": days, **_performance_metrics(window_records, horizon_days)})
+
+        return {
+            "horizon_days": int(horizon_days),
+            "generated_at": current_time.isoformat(),
+            "all_time": _performance_metrics(records, horizon_days),
+            "windows": windows,
+            "methodology": (
+                "Csak a valóban publikált, lejárt előrejelzések kerülnek be. "
+                "A MAE-t a változatlan árat feltételező alapmodellel, a "
+                "valószínűséget Brier-score alapján hasonlítjuk össze."
+            ),
         }
 
     def recent(self, coin_id: str, horizon_days: int, limit: int = 12) -> list[dict[str, Any]]:

@@ -363,9 +363,17 @@ def walk_forward_backtest(
             "method": "walk_forward",
             "minimum_training_days": MINIMUM_TRAINING_DAYS,
             "specialist": {
-                "key": SPECIALIST_REGISTRY[horizon_days].key,
+                "key": (
+                    specialist_state.selected_model_key
+                    or SPECIALIST_REGISTRY[horizon_days].key
+                ),
                 "label": SPECIALIST_REGISTRY[horizon_days].label,
-                "family": SPECIALIST_REGISTRY[horizon_days].family,
+                "family": (
+                    specialist_state.selected_model_family
+                    or SPECIALIST_REGISTRY[horizon_days].family
+                ),
+                "validation_skill_pct": specialist_state.validation_skill_pct,
+                "holdout_skill_pct": specialist_state.holdout_skill_pct,
                 "refit_days": specialist_refit_days,
             },
             "probability": {

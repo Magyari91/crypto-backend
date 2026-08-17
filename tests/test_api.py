@@ -256,11 +256,12 @@ def test_forecast_analytics_endpoint(tmp_path):
     assert payload["asset"]["symbol"] == "BTC"
     assert payload["training_readiness"]["status"] == "storage_required"
     assert payload["backtest"]["summary"]["samples"] > 50
-    assert payload["backtest"]["model"]["version"] == "5.0.0"
+    assert payload["backtest"]["model"]["version"] == "5.1.0"
     probability = payload["backtest"]["summary"]["probability"]
     assert probability["target_return_pct"] == 1.0
     assert 0 <= probability["brier_score"] <= 1
     assert payload["history"] == []
+    assert payload["live_performance"]["all_time"]["samples"] == 0
 
 
 def test_forecast_model_lab_endpoint(tmp_path):
@@ -299,10 +300,19 @@ def test_forecast_registry_exposes_challengers_and_feature_status(tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model_version"] == "5.0.0"
+    assert payload["model_version"] == "5.1.0"
     assert payload["feature_store"]["sample_count"] == 0
     assert payload["storage"] == {"backend": "sqlite", "persistent": False}
     assert payload["training_readiness"]["status"] == "storage_required"
+    assert payload["live_performance"]["all_time"]["samples"] == 0
+    seven_day_specialist = next(
+        item for item in payload["specialist_models"] if item["horizon_days"] == 7
+    )
+    assert [item["key"] for item in seven_day_specialist["candidates"]] == [
+        "gradient_boosting",
+        "extra_trees",
+        "huber",
+    ]
     seven_day = next(
         item for item in payload["probability_models"] if item["horizon_days"] == 7
     )

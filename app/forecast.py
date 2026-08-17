@@ -7,7 +7,7 @@ from app.probability_models import build_probability_forecast
 from app.specialist_models import build_specialist_estimate
 
 MODEL_NAME = "Kalibrált horizont-specialista ensemble"
-MODEL_VERSION = "5.0.0"
+MODEL_VERSION = "5.1.0"
 DIRECTION_THRESHOLDS = {1: 0.20, 7: 0.75, 30: 1.50}
 MINIMUM_FEATURE_DAYS = 50
 MAX_CALIBRATION_SAMPLES = 60
@@ -730,7 +730,7 @@ def build_forecast(
             "label": snapshot["regime_label"],
             "trend_strength": round(snapshot["trend_strength"], 2),
         },
-        "model": f"{MODEL_NAME} v5",
+        "model": f"{MODEL_NAME} v5.1",
         "model_version": MODEL_VERSION,
         "ensemble": {
             "weights": {
