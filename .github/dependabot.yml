@@ -9,6 +9,10 @@ updates:
       time: "05:30"
       timezone: Europe/Budapest
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
       backend-minor-and-patch:
         update-types:
