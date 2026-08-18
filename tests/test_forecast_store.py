@@ -226,3 +226,71 @@ def test_store_rejects_non_postgresql_database_url(tmp_path):
         assert "PostgreSQL URL" in str(exc)
     else:
         raise AssertionError("A non-PostgreSQL URL must be rejected")
+
+
+def test_store_reports_live_performance_windows(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    snapshots = [
+        (
+            "2026-07-10T12:01:00+00:00",
+            2.0,
+            "bullish",
+            {"lower_change_pct": 0.0, "upper_change_pct": 4.0},
+            70.0,
+            103.0,
+            "2026-07-11T12:16:00+00:00",
+        ),
+        (
+            "2026-07-11T12:01:00+00:00",
+            -1.0,
+            "bearish",
+            {"lower_change_pct": -3.0, "upper_change_pct": 1.0},
+            30.0,
+            98.0,
+            "2026-07-12T12:16:00+00:00",
+        ),
+    ]
+    for generated_at, expected, direction, interval, probability, price, observed_at in snapshots:
+        store.record_feature_snapshot(
+            coin_id="bitcoin",
+            symbol="BTC",
+            generated_at=generated_at,
+            horizon_days=1,
+            market={"current_price": 100.0},
+            technical={"rsi": 52.0},
+            derivatives={"available": True},
+            news_sentiment={"score": 0.1},
+            model={
+                "model_version": "5.1.0",
+                "expected_change_pct": expected,
+                "direction_key": direction,
+                "prediction_interval": interval,
+                "probability": {
+                    "probability_pct": probability,
+                    "baseline_probability_pct": 50.0,
+                    "event": {"target_return_pct": 1.0},
+                },
+            },
+        )
+        assert store.settle_due_feature_snapshots(
+            "bitcoin",
+            1,
+            observed_at,
+            price,
+        ) == 1
+
+    performance = store.performance_summary(
+        "bitcoin",
+        1,
+        now=datetime(2026, 7, 13, tzinfo=timezone.utc),
+    )
+
+    assert performance["all_time"]["samples"] == 2
+    assert performance["all_time"]["mae_pct"] == 1.0
+    assert performance["all_time"]["baseline_mae_pct"] == 2.5
+    assert performance["all_time"]["skill_vs_baseline_pct"] == 60.0
+    assert performance["all_time"]["active_directional_accuracy_pct"] == 100.0
+    assert performance["all_time"]["interval_coverage_pct"] == 100.0
+    assert performance["all_time"]["probability"]["brier_score"] == 0.09
+    assert performance["windows"][0]["samples"] == 2

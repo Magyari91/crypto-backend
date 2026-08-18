@@ -17,9 +17,10 @@ def synthetic_history(days: int = 280):
 
 
 def test_registry_assigns_a_different_model_to_each_horizon():
-    assert SPECIALIST_REGISTRY[1].family == "Huber regresszió"
-    assert SPECIALIST_REGISTRY[7].family == "Huber Gradient Boosting"
-    assert SPECIALIST_REGISTRY[30].family == "Ridge regresszió"
+    assert SPECIALIST_REGISTRY[1].candidates[0] == "huber"
+    assert SPECIALIST_REGISTRY[7].candidates[0] == "gradient_boosting"
+    assert SPECIALIST_REGISTRY[30].candidates[0] == "ridge"
+    assert all(len(spec.candidates) == 3 for spec in SPECIALIST_REGISTRY.values())
 
 
 def test_seven_day_specialist_activates_after_strict_holdout_validation():
@@ -32,4 +33,14 @@ def test_seven_day_specialist_activates_after_strict_holdout_validation():
     assert forecast["specialist"]["training_samples"] == 212
     assert forecast["specialist"]["holdout_samples"] > 0
     assert forecast["specialist"]["validation_skill_pct"] > 0
+    assert forecast["specialist"]["holdout_skill_pct"] > 0
+    assert forecast["specialist"]["selected_model_key"] in {
+        "gradient_boosting",
+        "extra_trees",
+        "huber",
+    }
+    assert sum(
+        candidate["selected"]
+        for candidate in forecast["specialist"]["validation_candidates"]
+    ) == 1
     assert 0 < forecast["specialist"]["blend_weight"] <= 0.7
