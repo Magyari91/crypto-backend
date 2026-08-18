@@ -37,3 +37,41 @@ jobs:
             --request POST \
             --header "X-Snapshot-Token: $SNAPSHOT_TOKEN" \
             "https://crypto-backend-pv99.onrender.com/api/v1/internal/snapshots/collect"
+
+      - name: Verify production services
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl_flags=(
+            --silent
+            --show-error
+            --fail-with-body
+            --retry 2
+            --retry-delay 10
+            --retry-all-errors
+            --connect-timeout 20
+            --max-time 120
+          )
+
+          health="$(curl "${curl_flags[@]}" \
+            "https://crypto-backend-pv99.onrender.com/health")"
+          test "$(jq -r '.status' <<<"$health")" = "ok"
+
+          registry="$(curl "${curl_flags[@]}" \
+            "https://crypto-backend-pv99.onrender.com/api/v1/forecast/registry")"
+          test "$(jq -r '.model_version // empty' <<<"$registry")" != ""
+
+          frontend_urls=(
+            "https://crypto-frontend-d94v.onrender.com/"
+            "https://crypto-frontend-d94v.onrender.com/market/"
+            "https://crypto-frontend-d94v.onrender.com/forecast/bitcoin/"
+            "https://crypto-frontend-d94v.onrender.com/models/"
+            "https://crypto-frontend-d94v.onrender.com/news/"
+            "https://crypto-frontend-d94v.onrender.com/robots.txt"
+            "https://crypto-frontend-d94v.onrender.com/sitemap.xml"
+          )
+
+          for url in "${frontend_urls[@]}"; do
+            curl "${curl_flags[@]}" --output /dev/null "$url"
+          done
