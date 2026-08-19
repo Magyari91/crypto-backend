@@ -234,6 +234,18 @@ class ForecastStore:
             "persistent": self.backend == "postgresql",
         }
 
+    def _database_size_bytes(self, connection: Any) -> int:
+        if self.backend == "postgresql":
+            row = self._execute(
+                connection,
+                "SELECT pg_database_size(current_database()) AS size_bytes",
+            ).fetchone()
+            return int(row["size_bytes"] if row else 0)
+        try:
+            return self.database_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
     def initialize(self) -> None:
         if self.backend == "sqlite":
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -701,6 +713,190 @@ class ForecastStore:
                 json.loads(latest["news_sentiment_json"]) if latest else None
             ),
             "latest_model": json.loads(latest["model_json"]) if latest else None,
+        }
+
+    def data_health(
+        self,
+        now: datetime | None = None,
+        storage_limit_mb: int = 0,
+        stale_after_minutes: int = 45,
+    ) -> dict[str, Any]:
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        current_time = current_time.astimezone(timezone.utc)
+
+        with self._connect() as connection:
+            forecast_row = self._execute(
+                connection,
+                "SELECT COUNT(*) AS forecast_count FROM forecast_log",
+            ).fetchone()
+            dataset_rows = self._execute(
+                connection,
+                """
+                SELECT
+                    snapshot.coin_id,
+                    snapshot.horizon_days,
+                    COUNT(*) AS sample_count,
+                    SUM(
+                        CASE WHEN outcome.feature_snapshot_id IS NOT NULL THEN 1 ELSE 0 END
+                    ) AS labeled_sample_count,
+                    COUNT(DISTINCT CASE
+                        WHEN outcome.feature_snapshot_id IS NOT NULL
+                        THEN SUBSTR(snapshot.generated_at, 1, 10)
+                    END) AS independent_labeled_days,
+                    MIN(snapshot.generated_at) AS first_generated_at,
+                    MAX(snapshot.generated_at) AS last_generated_at,
+                    MIN(outcome.observed_at) AS first_labeled_at,
+                    MAX(outcome.observed_at) AS last_labeled_at
+                FROM feature_snapshot AS snapshot
+                LEFT JOIN feature_outcome AS outcome
+                    ON outcome.feature_snapshot_id = snapshot.id
+                GROUP BY snapshot.coin_id, snapshot.horizon_days
+                ORDER BY snapshot.horizon_days, snapshot.coin_id
+                """,
+            ).fetchall()
+            pending_rows = self._execute(
+                connection,
+                """
+                SELECT snapshot.coin_id, snapshot.horizon_days, snapshot.generated_at
+                FROM feature_snapshot AS snapshot
+                LEFT JOIN feature_outcome AS outcome
+                    ON outcome.feature_snapshot_id = snapshot.id
+                WHERE outcome.feature_snapshot_id IS NULL
+                """,
+            ).fetchall()
+            database_size_bytes = self._database_size_bytes(connection)
+
+        pending_by_dataset: dict[tuple[str, int], list[datetime]] = {}
+        for row in pending_rows:
+            key = (str(row["coin_id"]), int(row["horizon_days"]))
+            due_at = _utc_datetime(str(row["generated_at"])) + timedelta(
+                days=key[1]
+            )
+            pending_by_dataset.setdefault(key, []).append(due_at)
+
+        datasets = []
+        latest_snapshot_at: datetime | None = None
+        total_snapshots = 0
+        total_outcomes = 0
+        total_overdue = 0
+        for row in dataset_rows:
+            key = (str(row["coin_id"]), int(row["horizon_days"]))
+            sample_count = int(row["sample_count"] or 0)
+            labeled_count = int(row["labeled_sample_count"] or 0)
+            due_dates = pending_by_dataset.get(key, [])
+            overdue_count = sum(due_at <= current_time for due_at in due_dates)
+            last_generated_at = str(row["last_generated_at"])
+            last_generated = _utc_datetime(last_generated_at)
+            if latest_snapshot_at is None or last_generated > latest_snapshot_at:
+                latest_snapshot_at = last_generated
+            total_snapshots += sample_count
+            total_outcomes += labeled_count
+            total_overdue += overdue_count
+            datasets.append(
+                {
+                    "coin_id": key[0],
+                    "horizon_days": key[1],
+                    "sample_count": sample_count,
+                    "labeled_sample_count": labeled_count,
+                    "pending_sample_count": sample_count - labeled_count,
+                    "overdue_sample_count": overdue_count,
+                    "independent_labeled_days": int(
+                        row["independent_labeled_days"] or 0
+                    ),
+                    "label_coverage_pct": round(
+                        (labeled_count / sample_count) * 100,
+                        2,
+                    ) if sample_count else 0.0,
+                    "first_generated_at": row["first_generated_at"],
+                    "last_generated_at": last_generated_at,
+                    "first_labeled_at": row["first_labeled_at"],
+                    "last_labeled_at": row["last_labeled_at"],
+                    "next_due_at": (
+                        min(due_dates).isoformat() if due_dates else None
+                    ),
+                }
+            )
+
+        latest_age_minutes = (
+            max(0.0, (current_time - latest_snapshot_at).total_seconds() / 60)
+            if latest_snapshot_at
+            else None
+        )
+        if latest_age_minutes is None:
+            collector_status = "empty"
+        elif latest_age_minutes > max(1, stale_after_minutes):
+            collector_status = "stale"
+        else:
+            collector_status = "healthy"
+
+        limit_bytes = max(0, int(storage_limit_mb)) * 1024 * 1024
+        utilization_pct = (
+            (database_size_bytes / limit_bytes) * 100 if limit_bytes else None
+        )
+        if utilization_pct is None:
+            storage_health = "unbounded"
+        elif utilization_pct >= 90:
+            storage_health = "critical"
+        elif utilization_pct >= 75:
+            storage_health = "warning"
+        else:
+            storage_health = "healthy"
+
+        persistent = self.backend == "postgresql"
+        if not persistent:
+            status = "storage_required"
+        elif not total_snapshots:
+            status = "collecting"
+        elif collector_status == "stale":
+            status = "stale"
+        elif storage_health == "critical":
+            status = "storage_critical"
+        elif storage_health == "warning":
+            status = "storage_warning"
+        elif total_overdue:
+            status = "labeling_delayed"
+        else:
+            status = "healthy"
+
+        return {
+            "status": status,
+            "generated_at": current_time.isoformat(),
+            "collector": {
+                "status": collector_status,
+                "latest_snapshot_at": (
+                    latest_snapshot_at.isoformat() if latest_snapshot_at else None
+                ),
+                "latest_snapshot_age_minutes": (
+                    round(latest_age_minutes, 2)
+                    if latest_age_minutes is not None
+                    else None
+                ),
+                "stale_after_minutes": max(1, int(stale_after_minutes)),
+            },
+            "storage": {
+                **self.storage_status(),
+                "database_size_bytes": database_size_bytes,
+                "limit_bytes": limit_bytes or None,
+                "utilization_pct": (
+                    round(utilization_pct, 4)
+                    if utilization_pct is not None
+                    else None
+                ),
+                "status": storage_health,
+            },
+            "totals": {
+                "forecast_count": int(
+                    forecast_row["forecast_count"] if forecast_row else 0
+                ),
+                "snapshot_count": total_snapshots,
+                "outcome_count": total_outcomes,
+                "pending_count": total_snapshots - total_outcomes,
+                "overdue_count": total_overdue,
+                "active_dataset_count": len(datasets),
+            },
+            "datasets": datasets,
         }
 
     def performance_summary(

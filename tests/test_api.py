@@ -322,6 +322,47 @@ def test_forecast_registry_exposes_challengers_and_feature_status(tmp_path):
     ]
 
 
+def test_forecast_data_health_covers_every_training_dataset(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    store.record_feature_snapshot(
+        coin_id="bitcoin",
+        symbol="BTC",
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        horizon_days=1,
+        market={"current_price": 100.0},
+        technical={"rsi": 52.0},
+        derivatives={"available": True},
+        news_sentiment={"score": 0.1},
+        model={"model_version": "5.1.0"},
+    )
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.get("/api/v1/forecast/data-health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert response.headers["cache-control"] == "no-store"
+    assert payload["status"] == "storage_required"
+    assert payload["collector"]["interval_minutes"] == 15
+    assert payload["collector"]["rotation_slots"] == 40
+    assert payload["storage"]["backend"] == "sqlite"
+    assert payload["totals"]["snapshot_count"] == 1
+    assert payload["totals"]["active_dataset_count"] == 1
+    assert payload["totals"]["expected_dataset_count"] == 30
+    assert payload["totals"]["dataset_coverage_pct"] == 3.33
+    assert len(payload["datasets"]) == 30
+    assert [row["horizon_days"] for row in payload["horizons"]] == [1, 7, 30]
+    bitcoin = next(
+        row
+        for row in payload["datasets"]
+        if row["coin_id"] == "bitcoin" and row["horizon_days"] == 1
+    )
+    assert bitcoin["sample_count"] == 1
+    assert bitcoin["training"]["status"] == "storage_required"
+
+
 def snapshot_dashboard(coin: str = "bitcoin", horizon: int = 7):
     return {
         "generated_at": "2026-08-08T12:01:00+00:00",

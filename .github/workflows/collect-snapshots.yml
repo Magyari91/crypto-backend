@@ -57,6 +57,14 @@ jobs:
           health="$(curl "${curl_flags[@]}" \
             "https://crypto-backend-pv99.onrender.com/health")"
           test "$(jq -r '.status' <<<"$health")" = "ok"
+          test "$(jq -r '.storage.backend' <<<"$health")" = "postgresql"
+          test "$(jq -r '.storage.persistent' <<<"$health")" = "true"
+
+          data_health="$(curl "${curl_flags[@]}" \
+            "https://crypto-backend-pv99.onrender.com/api/v1/forecast/data-health")"
+          test "$(jq -r '.collector.status' <<<"$data_health")" = "healthy"
+          test "$(jq -r '.storage.persistent' <<<"$data_health")" = "true"
+          test "$(jq -r '.totals.snapshot_count' <<<"$data_health")" -gt 0
 
           registry="$(curl "${curl_flags[@]}" \
             "https://crypto-backend-pv99.onrender.com/api/v1/forecast/registry")"

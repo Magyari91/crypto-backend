@@ -228,6 +228,67 @@ def test_store_rejects_non_postgresql_database_url(tmp_path):
         raise AssertionError("A non-PostgreSQL URL must be rejected")
 
 
+def test_store_reports_data_pipeline_health_and_storage_usage(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    store.record_feature_snapshot(
+        coin_id="bitcoin",
+        symbol="BTC",
+        generated_at="2026-07-10T12:01:00+00:00",
+        horizon_days=1,
+        market={"current_price": 100.0},
+        technical={"rsi": 52.0},
+        derivatives={"available": True},
+        news_sentiment={"score": 0.1},
+        model={"model_version": "5.1.0"},
+    )
+    assert store.settle_due_feature_snapshots(
+        "bitcoin",
+        1,
+        "2026-07-11T12:16:00+00:00",
+        102.0,
+    ) == 1
+    store.record_feature_snapshot(
+        coin_id="ethereum",
+        symbol="ETH",
+        generated_at="2026-07-11T12:10:00+00:00",
+        horizon_days=7,
+        market={"current_price": 200.0},
+        technical={"rsi": 48.0},
+        derivatives={"available": True},
+        news_sentiment={"score": 0.0},
+        model={"model_version": "5.1.0"},
+    )
+
+    health = store.data_health(
+        now=datetime(2026, 7, 11, 12, 20, tzinfo=timezone.utc),
+        storage_limit_mb=1,
+        stale_after_minutes=45,
+    )
+
+    assert health["status"] == "storage_required"
+    assert health["collector"]["status"] == "healthy"
+    assert health["collector"]["latest_snapshot_age_minutes"] == 10.0
+    assert health["storage"]["database_size_bytes"] > 0
+    assert health["storage"]["limit_bytes"] == 1024 * 1024
+    assert health["storage"]["utilization_pct"] > 0
+    assert health["totals"] == {
+        "forecast_count": 0,
+        "snapshot_count": 2,
+        "outcome_count": 1,
+        "pending_count": 1,
+        "overdue_count": 0,
+        "active_dataset_count": 2,
+    }
+    bitcoin = next(
+        row
+        for row in health["datasets"]
+        if row["coin_id"] == "bitcoin" and row["horizon_days"] == 1
+    )
+    assert bitcoin["labeled_sample_count"] == 1
+    assert bitcoin["label_coverage_pct"] == 100.0
+
+
 def test_store_reports_live_performance_windows(tmp_path):
     store = ForecastStore(tmp_path / "forecast.sqlite3")
     store.initialize()

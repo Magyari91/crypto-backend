@@ -21,6 +21,7 @@ Az API dokumentacioja: `http://localhost:8000/docs`
 - `GET /api/v1/forecast/analytics?coin=bitcoin&horizon=7` - visszameres es naplo
 - `GET /api/v1/forecast/lab?coin=bitcoin&horizon=7` - igeny szerinti oras modelllabor
 - `GET /api/v1/forecast/registry?coin=bitcoin&horizon=7` - champion/challenger es feature-store allapot
+- `GET /api/v1/forecast/data-health` - tarhely-, collector- es tanitasi adatsor monitor
 - `GET /api/v1/derivatives?coin=bitcoin` - funding, open interest es pozicionalasi kontextus
 - `GET /api/v1/markets?limit=200` - legfeljebb 200 eszkozos, rangsorolt piaclista
 - `GET /api/v1/news` - friss hirek
@@ -168,6 +169,20 @@ A backend csak ezt az explicit valtozot olvassa; egy mas szolgaltatasbol maradt
 beallitva, a rendszer automatikusan SQLite-ra ter vissza. A `GET /health`
 valasz `storage` mezoje jelzi az aktiv backendet.
 
+A `FORECAST_STORAGE_LIMIT_MB` a szolgaltatoi tarhelykeretet adja meg a
+monitorozashoz, a `SNAPSHOT_STALE_AFTER_MINUTES` pedig azt a kesest, amely utan
+a collector mar elavult allapotunak szamit. Az alapertelmezett ertekek a Neon
+Free 512 MB-os keretehez es a 15 perces utemezeshez illeszkednek:
+
+```text
+FORECAST_STORAGE_LIMIT_MB=512
+SNAPSHOT_STALE_AFTER_MINUTES=45
+```
+
+A `/api/v1/forecast/data-health` titkok nelkul kozli az adatbazis meretet,
+kihasznaltsagat, a collector frissesseget, valamint mind a 30 eszkoz/idotav
+adatsor snapshot-, cimke- es tanitasi keszultseget.
+
 A Render alap fajlrendszere nem tartos, ezert az ingyenes SQLite uzemmod
 deploy vagy peldany-ujrainditas utan elveszitheti a korabbi mintakat.
 Alternativa egy csatolt persistent disk es azon beluli utvonal, peldaul
@@ -176,11 +191,10 @@ automatikusan, mert csak tamogatott, fizetos szolgaltatasi csomaghoz adhato.
 Reszletek a
 [Render persistent disk dokumentaciojaban](https://render.com/docs/disks) vannak.
 
-Folyamatos eles uzemhez az ajanlott minimum egy mindig aktiv backend es egy
-fizetos Render Postgres ugyanabban a regioban. A Render ingyenes PostgreSQL
-peldanya 30 nap utan lejar, ezert csak atmeneti tesztre alkalmas. A legkisebb
-eles konfiguracio beallitasa elott erdemes kulon koltsegkeretet jovahagyni,
-majd a belso kapcsolatot `FORECAST_DATABASE_URL` neven megadni.
+Az aktualis koltseghatekony konfiguracio Neon Free PostgreSQL-t hasznal az
+AWS Oregon regioban, poolozott SSL-kapcsolattal. A backend szolgaltatofuggetlen
+PostgreSQL URL-t olvas, ezert a kesobbi fizetos Render vagy Neon csomagra valtas
+alkalmazaskod-modositas nelkul elvegezheto.
 
 ## Utemezett snapshot gyujtes
 
@@ -199,3 +213,5 @@ Az aktivalashoz ugyanazt az eros, veletlen tokent kell beallitani ket helyen:
 Token nelkul a gyujto `503`, hibas tokennel `401` valaszt ad. Kezi ellenorzeshez
 a workflow a GitHub Actions feluleterol is indithato. Celzott kezi gyujtesnel a
 vedett vegpont a `coin` es `horizon` query parametert egyutt fogadja el.
+A workflow minden gyujtes utan ellenorzi a PostgreSQL tartossagat, a collector
+frissesseget es azt is, hogy legalabb egy snapshot tenylegesen elerheto.
