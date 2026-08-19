@@ -17,5 +17,9 @@ services:
         sync: false
       - key: FORECAST_DATABASE_URL
         sync: false
+      - key: FORECAST_STORAGE_LIMIT_MB
+        value: 512
       - key: SNAPSHOT_TOKEN
         sync: false
+      - key: SNAPSHOT_STALE_AFTER_MINUTES
+        value: 45

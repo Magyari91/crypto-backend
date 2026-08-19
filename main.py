@@ -29,6 +29,7 @@ from app.dashboard import (
     normalize_market_rows,
     normalize_news,
 )
+from app.data_health import build_data_health_payload
 from app.forecast import DIRECTION_THRESHOLDS, MODEL_VERSION
 from app.forecast_store import ForecastStore
 from app.market_data import MarketDataService, UpstreamServiceError
@@ -595,6 +596,22 @@ async def forecast_registry(
             "mellett válhat aktívvá."
         ),
     }
+
+
+@app.get("/api/v1/forecast/data-health")
+async def forecast_data_health(
+    request: Request,
+    response: Response,
+):
+    store = journal_store(request)
+    health = await asyncio.to_thread(
+        store.data_health,
+        None,
+        settings.forecast_storage_limit_mb,
+        settings.snapshot_stale_after_minutes,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return build_data_health_payload(health)
 
 
 @app.get("/api/v1/derivatives")

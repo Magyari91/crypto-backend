@@ -28,7 +28,13 @@ class Settings:
         "FORECAST_DATABASE_URL",
         "",
     ).strip()
+    forecast_storage_limit_mb: int = int(
+        os.getenv("FORECAST_STORAGE_LIMIT_MB", "512")
+    )
     snapshot_token: str = os.getenv("SNAPSHOT_TOKEN", "").strip()
+    snapshot_stale_after_minutes: int = int(
+        os.getenv("SNAPSHOT_STALE_AFTER_MINUTES", "45")
+    )
 
 
 settings = Settings()
