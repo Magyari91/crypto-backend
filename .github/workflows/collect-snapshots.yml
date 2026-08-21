@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: snapshot-collector
+  group: forecast-pipeline
   cancel-in-progress: false
 
 jobs:

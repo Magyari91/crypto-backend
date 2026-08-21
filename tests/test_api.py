@@ -486,3 +486,14 @@ def test_snapshot_collector_uses_scheduled_target(tmp_path, monkeypatch):
     assert payload["scheduled"] is True
     assert payload["target"] == {"coin": "ethereum", "horizon_days": 30}
     assert store.feature_status("ethereum", 30)["sample_count"] == 1
+
+
+def test_forecast_publication_schedule_endpoint():
+    with TestClient(app) as client:
+        response = client.get("/api/v1/forecast/schedule")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["timezone"] == "UTC"
+    assert payload["trigger_cron"] == "12 0 * * *"
+    assert [rule["horizon_days"] for rule in payload["rules"]] == [1, 7, 30]

@@ -6,6 +6,7 @@ from app.assets import ANALYSIS_ASSETS, analysis_asset_list
 from app.forecast import build_forecast, calculate_indicators
 from app.market_data import MarketDataService, UpstreamServiceError
 from app.news import aggregate_news_sentiment, normalize_articles
+from app.publication_schedule import publication_rule_payload
 
 
 SUPPORTED_COINS = ANALYSIS_ASSETS
@@ -187,8 +188,10 @@ async def build_dashboard(
     news_sentiment = aggregate_news_sentiment(news_rows, selected_coin)
     selected["forecast"]["sentiment_context"] = dict(news_sentiment)
 
+    generated_at = datetime.now(timezone.utc)
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "forecast_publication": publication_rule_payload(horizon_days, generated_at),
         "market": {
             "overview_available": bool(global_data),
             "total_market_cap": _optional_number(global_data.get("total_market_cap", {}).get("usd")),

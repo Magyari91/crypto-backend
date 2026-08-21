@@ -36,6 +36,7 @@ from app.market_data import MarketDataService, UpstreamServiceError
 from app.model_lab import build_model_lab
 from app.news import aggregate_news_sentiment
 from app.probability_models import probability_registry_payload
+from app.publication_schedule import publication_schedule_payload
 from app.snapshot_schedule import scheduled_snapshot_target
 from app.specialist_models import specialist_registry_payload
 from app.training_readiness import build_training_readiness
@@ -169,6 +170,7 @@ async def root():
         "version": MODEL_VERSION,
         "docs": "/docs",
         "health": "/health",
+        "forecast_schedule": "/api/v1/forecast/schedule",
     }
 
 
@@ -316,8 +318,15 @@ async def forecast(
     return {
         "generated_at": payload["generated_at"],
         "asset": payload["selected"],
+        "forecast_publication": payload["forecast_publication"],
         "disclaimer": payload["disclaimer"],
     }
+
+
+@app.get("/api/v1/forecast/schedule")
+async def forecast_schedule(response: Response):
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=900"
+    return publication_schedule_payload()
 
 
 @app.get("/api/v1/forecast/analytics")
