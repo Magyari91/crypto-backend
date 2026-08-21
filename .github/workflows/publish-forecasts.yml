@@ -1,0 +1,149 @@
+name: Forecast Publisher
+
+on:
+  schedule:
+    - cron: "12 0 * * *"
+  workflow_dispatch:
+    inputs:
+      publication:
+        description: Forecast package to publish for an emergency rerun
+        type: choice
+        required: true
+        default: scheduled
+        options:
+          - scheduled
+          - daily
+          - weekly
+          - monthly
+          - all
+
+permissions: {}
+
+concurrency:
+  group: forecast-pipeline
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out publication schedule
+        uses: actions/checkout@v7
+
+      - name: Select due horizons
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PUBLICATION: ${{ inputs.publication }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            case "$MANUAL_PUBLICATION" in
+              daily) horizons="1" ;;
+              weekly) horizons="7" ;;
+              monthly) horizons="30" ;;
+              all) horizons="1 7 30" ;;
+              scheduled) horizons="$(python -m app.publication_schedule)" ;;
+              *) echo "Unknown publication package: $MANUAL_PUBLICATION"; exit 1 ;;
+            esac
+          else
+            horizons="$(python -m app.publication_schedule)"
+          fi
+
+          echo "horizons=$horizons" >> "$GITHUB_OUTPUT"
+          echo "Publishing horizons: $horizons"
+
+      - name: Publish top ten forecasts
+        shell: bash
+        env:
+          BACKEND_URL: https://crypto-backend-pv99.onrender.com
+          HORIZONS: ${{ steps.plan.outputs.horizons }}
+          SNAPSHOT_TOKEN: ${{ secrets.SNAPSHOT_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          if [[ -z "$SNAPSHOT_TOKEN" ]]; then
+            echo "The SNAPSHOT_TOKEN repository secret is not configured."
+            exit 1
+          fi
+
+          assets=(
+            bitcoin ethereum binancecoin ripple solana
+            tron hyperliquid dogecoin zcash cardano
+          )
+          failures=()
+
+          {
+            echo "### Automated forecast publication"
+            echo ""
+            echo "| Horizon | Asset | Forecast | Feature snapshot |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for horizon in $HORIZONS; do
+            for coin in "${assets[@]}"; do
+              url="${BACKEND_URL}/api/v1/internal/snapshots/collect?coin=${coin}&horizon=${horizon}"
+              if ! response="$(curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --retry 3 \
+                --retry-delay 20 \
+                --retry-all-errors \
+                --connect-timeout 20 \
+                --max-time 300 \
+                --request POST \
+                --header "X-Snapshot-Token: $SNAPSHOT_TOKEN" \
+                "$url")"; then
+                failures+=("${coin}:${horizon}")
+                echo "| ${horizon}d | ${coin} | failed | failed |" >> "$GITHUB_STEP_SUMMARY"
+                continue
+              fi
+
+              if ! jq -e \
+                --arg coin "$coin" \
+                --argjson horizon "$horizon" \
+                '.status == "collected" and .target.coin == $coin and .target.horizon_days == $horizon' \
+                <<<"$response" > /dev/null; then
+                failures+=("${coin}:${horizon}")
+                echo "Unexpected response for ${coin}:${horizon}: $response"
+                echo "| ${horizon}d | ${coin} | invalid response | invalid response |" >> "$GITHUB_STEP_SUMMARY"
+                continue
+              fi
+
+              forecast_created="$(jq -r '.created.forecast' <<<"$response")"
+              snapshot_created="$(jq -r '.created.feature_snapshot' <<<"$response")"
+              echo "| ${horizon}d | ${coin} | ${forecast_created} | ${snapshot_created} |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+
+          if (( ${#failures[@]} )); then
+            printf 'Forecast publication failed for: %s\n' "${failures[*]}"
+            exit 1
+          fi
+
+      - name: Verify persistent publication storage
+        shell: bash
+        env:
+          BACKEND_URL: https://crypto-backend-pv99.onrender.com
+        run: |
+          set -euo pipefail
+
+          health="$(curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --retry 2 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            --connect-timeout 20 \
+            --max-time 120 \
+            "${BACKEND_URL}/api/v1/forecast/data-health")"
+
+          test "$(jq -r '.collector.status' <<<"$health")" = "healthy"
+          test "$(jq -r '.storage.backend' <<<"$health")" = "postgresql"
+          test "$(jq -r '.storage.persistent' <<<"$health")" = "true"
+          test "$(jq -r '.totals.snapshot_count' <<<"$health")" -gt 0

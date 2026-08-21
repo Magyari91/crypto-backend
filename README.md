@@ -196,6 +196,30 @@ AWS Oregon regioban, poolozott SSL-kapcsolattal. A backend szolgaltatofuggetlen
 PostgreSQL URL-t olvas, ezert a kesobbi fizetos Render vagy Neon csomagra valtas
 alkalmazaskod-modositas nelkul elvegezheto.
 
+## Automatikus forecast publikalas
+
+A `.github/workflows/publish-forecasts.yml` workflow minden nap `00:12 UTC`
+idopontban automatikusan lefut. A napi gyertyazaras utan a top tiz elemzett
+eszkozhoz az alabbi csomagokat naplozza PostgreSQL-be:
+
+| Horizont | Automatikus publikalas |
+| --- | --- |
+| 1 nap | minden nap 00:12 UTC |
+| 7 nap | minden hetfon 00:12 UTC |
+| 30 nap | minden honap elso napjan 00:12 UTC |
+
+Hetfon a napi es heti, a honap elso napjan a napi es havi csomag ugyanabban a
+futasban keszul el. Ha a honap elso napja hetfo, mindharom horizont lefut. A
+workflow ugyanazt a `SNAPSHOT_TOKEN` secretet hasznalja, mint a suru collector,
+es kozos `forecast-pipeline` concurrency group akadalyozza meg az utkozest.
+Minden eszkozt kulon, automatikus ujraprobalkozassal ker le, majd ellenorzi a
+PostgreSQL-tarolast es a collector frissesseget. A kezi workflow dispatch csak
+veszhelyzeti ujrafutasi lehetoseg; a normal publikalashoz nem szukseges.
+
+A publikus `GET /api/v1/forecast/schedule` vegpont visszaadja mindharom szabaly
+es a kovetkezo futas idopontjat. A dashboard valasz az aktualis horizonthoz a
+`forecast_publication` mezoben ugyanezt a kontextust tartalmazza.
+
 ## Utemezett snapshot gyujtes
 
 A `.github/workflows/collect-snapshots.yml` workflow 15 percenkent egyetlen

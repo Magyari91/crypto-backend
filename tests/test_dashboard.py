@@ -83,6 +83,8 @@ def test_dashboard_contract():
 
     assert payload["selected"]["id"] == "bitcoin"
     assert payload["selected"]["forecast"]["horizon_days"] == 7
+    assert payload["forecast_publication"]["horizon_days"] == 7
+    assert payload["forecast_publication"]["cadence"] == "weekly"
     assert payload["selected"]["forecast"]["history_days"] == 365
     assert payload["selected"]["forecast"]["data_source"] == "CoinGecko"
     assert payload["market"]["btc_dominance"] == 54.2
