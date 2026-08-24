@@ -351,6 +351,71 @@ class ForecastStore:
                 ON feature_outcome (observed_at DESC)
                 """,
             )
+            self._execute(
+                connection,
+                """
+                CREATE TABLE IF NOT EXISTS dashboard_snapshot (
+                    coin_id TEXT NOT NULL,
+                    horizon_days INTEGER NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (coin_id, horizon_days)
+                )
+                """,
+            )
+
+    def record_dashboard_snapshot(
+        self,
+        coin_id: str,
+        horizon_days: int,
+        generated_at: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        timestamp = _utc_datetime(generated_at)
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                INSERT INTO dashboard_snapshot (
+                    coin_id,
+                    horizon_days,
+                    generated_at,
+                    payload_json
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT (coin_id, horizon_days) DO UPDATE SET
+                    generated_at = excluded.generated_at,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    coin_id,
+                    int(horizon_days),
+                    timestamp.isoformat(),
+                    serialized,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def latest_dashboard_snapshot(
+        self,
+        coin_id: str,
+        horizon_days: int,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT payload_json
+                FROM dashboard_snapshot
+                WHERE coin_id = ? AND horizon_days = ?
+                LIMIT 1
+                """,
+                (coin_id, int(horizon_days)),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
 
     def record(
         self,

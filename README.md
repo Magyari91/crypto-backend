@@ -220,6 +220,24 @@ A publikus `GET /api/v1/forecast/schedule` vegpont visszaadja mindharom szabaly
 es a kovetkezo futas idopontjat. A dashboard valasz az aktualis horizonthoz a
 `forecast_publication` mezoben ugyanezt a kontextust tartalmazza.
 
+## Gyors dashboard-kiszolgalas
+
+Az utemezett gyujtes a teljes legutobbi dashboard-valaszt is PostgreSQL-ben
+tarolja coin/idotav paronkent. A publikus dashboard ezt a snapshotot azonnal
+visszaadja, az elavult adat frissiteset pedig deduplikalt hatterfeladatkent
+inditja el. Emiatt a bongeszonek nem kell megvarnia a kulso adatforrasokat es a
+modell ujraszamitasat.
+
+```text
+DASHBOARD_FRESH_SECONDS=300
+OPTIONAL_DATA_TIMEOUT_SECONDS=4
+```
+
+Az elso ertek a teljes snapshot frissessegi ablaka. A masodik megakadalyozza,
+hogy egy lassu, kiegeszito derivativ adatforras feltartsa a fo adatfolyamot.
+Az API `delivery` mezoje es `X-Dashboard-Source` fejlece jelzi, hogy elo vagy
+tarolt valasz erkezett-e, illetve fut-e hatterfrissites.
+
 ## Utemezett snapshot gyujtes
 
 A `.github/workflows/collect-snapshots.yml` workflow 15 percenkent egyetlen

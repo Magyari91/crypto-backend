@@ -86,6 +86,29 @@ def test_store_persists_probability_audit_fields(tmp_path):
     assert record["probability_decision"] == "buy_candidate"
 
 
+def test_store_keeps_latest_dashboard_snapshot_per_horizon(tmp_path):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    first = {
+        "generated_at": "2026-07-10T12:01:00+00:00",
+        "selected": {"id": "bitcoin", "forecast": {"horizon_days": 7}},
+    }
+    latest = {
+        "generated_at": "2026-07-10T12:16:00+00:00",
+        "selected": {"id": "bitcoin", "forecast": {"horizon_days": 7}},
+    }
+
+    assert store.record_dashboard_snapshot(
+        "bitcoin", 7, first["generated_at"], first
+    ) is True
+    assert store.record_dashboard_snapshot(
+        "bitcoin", 7, latest["generated_at"], latest
+    ) is True
+
+    assert store.latest_dashboard_snapshot("bitcoin", 7) == latest
+    assert store.latest_dashboard_snapshot("bitcoin", 1) is None
+
+
 def test_store_persists_point_in_time_feature_snapshots(tmp_path):
     store = ForecastStore(tmp_path / "forecast.sqlite3")
     store.initialize()

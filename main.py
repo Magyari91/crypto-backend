@@ -36,7 +36,10 @@ from app.market_data import MarketDataService, UpstreamServiceError
 from app.model_lab import build_model_lab
 from app.news import aggregate_news_sentiment
 from app.probability_models import probability_registry_payload
-from app.publication_schedule import publication_schedule_payload
+from app.publication_schedule import (
+    publication_rule_payload,
+    publication_schedule_payload,
+)
 from app.snapshot_schedule import scheduled_snapshot_target
 from app.specialist_models import specialist_registry_payload
 from app.training_readiness import build_training_readiness
@@ -55,6 +58,7 @@ async def lifespan(app: FastAPI):
     app.state.forecast_store = forecast_store
     app.state.analytics_cache = AsyncTTLCache(settings.stale_cache_seconds)
     app.state.analytics_jobs = AsyncJobCache()
+    app.state.dashboard_jobs = AsyncJobCache()
     app.state.snapshot_lock = asyncio.Lock()
     try:
         yield
@@ -107,6 +111,12 @@ async def record_dashboard_forecast(
     store = journal_store(request)
 
     def persist() -> dict[str, bool]:
+        dashboard_snapshot_created = store.record_dashboard_snapshot(
+            coin_id=selected["id"],
+            horizon_days=int(forecast["horizon_days"]),
+            generated_at=payload["generated_at"],
+            payload=payload,
+        )
         forecast_created = store.record(
             selected["id"],
             selected["symbol"],
@@ -147,6 +157,7 @@ async def record_dashboard_forecast(
             observed_price=selected.get("current_price"),
         )
         return {
+            "dashboard_snapshot": dashboard_snapshot_created,
             "forecast": forecast_created,
             "feature_snapshot": snapshot_created,
             "outcomes_settled": outcomes_settled,
@@ -161,6 +172,95 @@ def validate_coin(coin: str) -> str:
         supported = ", ".join(SUPPORTED_COINS)
         raise ValueError(f"Nem támogatott eszköz. Választható: {supported}")
     return normalized
+
+
+def _dashboard_snapshot_age(payload: dict, now: datetime) -> float:
+    try:
+        generated_at = datetime.fromisoformat(
+            str(payload["generated_at"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - generated_at.astimezone(timezone.utc)).total_seconds())
+
+
+def _dashboard_delivery(
+    payload: dict,
+    horizon: int,
+    source: str,
+    refreshing: bool,
+) -> dict:
+    served_at = datetime.now(timezone.utc)
+    delivery = {
+        "source": source,
+        "refreshing": refreshing,
+        "served_at": served_at.isoformat(),
+        "snapshot_age_seconds": round(_dashboard_snapshot_age(payload, served_at), 1),
+    }
+    if refreshing:
+        delivery["retry_after_seconds"] = 3
+    return {
+        **payload,
+        "forecast_publication": publication_rule_payload(horizon, served_at),
+        "delivery": delivery,
+    }
+
+
+async def _build_and_store_dashboard(
+    request: Request,
+    coin: str,
+    horizon: int,
+) -> dict:
+    payload = await build_dashboard(market_service(request), coin, horizon)
+    await record_dashboard_forecast(request, payload)
+    return payload
+
+
+async def load_dashboard_payload(
+    request: Request,
+    coin: str,
+    horizon: int,
+) -> dict:
+    store = journal_store(request)
+    try:
+        stored = await asyncio.to_thread(
+            store.latest_dashboard_snapshot,
+            coin,
+            horizon,
+        )
+    except Exception:
+        stored = None
+
+    now = datetime.now(timezone.utc)
+    if stored is None:
+        fresh = await _build_and_store_dashboard(request, coin, horizon)
+        return _dashboard_delivery(fresh, horizon, "live", False)
+
+    age_seconds = _dashboard_snapshot_age(stored, now)
+    if age_seconds <= max(1, settings.dashboard_fresh_seconds):
+        return _dashboard_delivery(stored, horizon, "snapshot", False)
+
+    async def refresh_safely():
+        try:
+            return await _build_and_store_dashboard(request, coin, horizon)
+        except Exception:
+            return None
+
+    job_status = await request.app.state.dashboard_jobs.get_or_start(
+        f"dashboard:{coin}:{horizon}",
+        max(1, settings.dashboard_fresh_seconds),
+        refresh_safely,
+    )
+    if job_status.state == "ready" and job_status.value is not None:
+        return _dashboard_delivery(job_status.value, horizon, "live", False)
+    return _dashboard_delivery(
+        stored,
+        horizon,
+        "snapshot",
+        job_status.state == "pending",
+    )
 
 
 @app.get("/")
@@ -290,9 +390,20 @@ async def dashboard(
             content={"detail": "Az időtáv 1, 7 vagy 30 nap lehet."},
         )
 
-    response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=120"
-    payload = await build_dashboard(market_service(request), selected_coin, horizon)
-    await record_dashboard_forecast(request, payload)
+    payload = await load_dashboard_payload(request, selected_coin, horizon)
+    refreshing = bool(payload.get("delivery", {}).get("refreshing"))
+    response.headers["Cache-Control"] = (
+        "no-store"
+        if refreshing
+        else "public, max-age=30, stale-while-revalidate=300"
+    )
+    response.headers["X-Dashboard-Source"] = str(
+        payload.get("delivery", {}).get("source", "live")
+    )
+    if refreshing:
+        response.headers["Retry-After"] = str(
+            payload["delivery"].get("retry_after_seconds", 3)
+        )
     return payload
 
 
@@ -313,8 +424,7 @@ async def forecast(
             content={"detail": "Az időtáv 1, 7 vagy 30 nap lehet."},
         )
 
-    payload = await build_dashboard(market_service(request), selected_coin, horizon)
-    await record_dashboard_forecast(request, payload)
+    payload = await load_dashboard_payload(request, selected_coin, horizon)
     return {
         "generated_at": payload["generated_at"],
         "asset": payload["selected"],

@@ -1,7 +1,9 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 
+import app.market_data as market_data_module
 from app.market_data import MarketDataService, UpstreamServiceError
 
 
@@ -154,6 +156,41 @@ def test_hype_forecast_history_prefers_official_hyperliquid_candles():
     assert service.requests[0][2]["type"] == "candleSnapshot"
     assert service.requests[0][2]["req"]["coin"] == "HYPE"
     assert service.requests[0][2]["req"]["interval"] == "1d"
+
+
+class SlowOptionalDerivativesService(MarketDataService):
+    def __init__(self):
+        self.derivative_days = None
+
+    async def _binance_history(self, _symbol, _days):
+        return {
+            "prices": [[index * 86_400_000, 100.0 + index] for index in range(61)],
+            "total_volumes": [[index * 86_400_000, 1_000.0] for index in range(61)],
+            "source": "test",
+        }
+
+    async def _binance_derivatives_history(self, _symbol, days):
+        self.derivative_days = days
+        await asyncio.sleep(1)
+        return {"funding_rates": [], "snapshot": {"available": True}}
+
+
+def test_forecast_history_times_out_optional_derivatives(monkeypatch):
+    monkeypatch.setattr(
+        market_data_module,
+        "settings",
+        replace(
+            market_data_module.settings,
+            optional_data_timeout_seconds=0.01,
+        ),
+    )
+    service = SlowOptionalDerivativesService()
+
+    history = asyncio.run(service.forecast_history("bitcoin", days=2000))
+
+    assert len(history["prices"]) == 61
+    assert service.derivative_days == 365
+    assert history["derivatives"]["status"] == "unavailable"
 
 
 def test_hype_intraday_forecast_prefers_official_hyperliquid_candles():
