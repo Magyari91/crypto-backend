@@ -759,10 +759,24 @@ class MarketDataService:
                     pass
             return await self._binance_history(symbol, days)
 
+        async def load_optional_derivatives() -> dict[str, Any]:
+            try:
+                return await asyncio.wait_for(
+                    self._binance_derivatives_history(symbol, min(days, 365)),
+                    timeout=max(0.1, settings.optional_data_timeout_seconds),
+                )
+            except (TimeoutError, UpstreamServiceError):
+                derivatives = normalize_derivatives()
+                derivatives["snapshot"]["status"] = "unavailable"
+                derivatives["snapshot"]["reason"] = (
+                    "A futures adatforrás átmenetileg nem érhető el."
+                )
+                return derivatives
+
         try:
             history, derivatives = await asyncio.gather(
                 load_history(),
-                self._binance_derivatives_history(symbol, days),
+                load_optional_derivatives(),
                 return_exceptions=True,
             )
             if isinstance(history, Exception):

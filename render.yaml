@@ -23,3 +23,7 @@ services:
         sync: false
       - key: SNAPSHOT_STALE_AFTER_MINUTES
         value: 45
+      - key: DASHBOARD_FRESH_SECONDS
+        value: 300
+      - key: OPTIONAL_DATA_TIMEOUT_SECONDS
+        value: 4

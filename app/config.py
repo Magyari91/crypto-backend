@@ -19,6 +19,12 @@ class Settings:
     chart_cache_seconds: int = int(os.getenv("CHART_CACHE_SECONDS", "300"))
     news_cache_seconds: int = int(os.getenv("NEWS_CACHE_SECONDS", "300"))
     stale_cache_seconds: int = int(os.getenv("STALE_CACHE_SECONDS", "900"))
+    dashboard_fresh_seconds: int = int(
+        os.getenv("DASHBOARD_FRESH_SECONDS", "300")
+    )
+    optional_data_timeout_seconds: float = float(
+        os.getenv("OPTIONAL_DATA_TIMEOUT_SECONDS", "4")
+    )
     cryptocompare_api_key: str = os.getenv("CRYPTOCOMPARE_API_KEY", "").strip()
     forecast_db_path: str = os.getenv(
         "FORECAST_DB_PATH",

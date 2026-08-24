@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -451,6 +452,66 @@ def test_snapshot_collector_persists_manual_target(tmp_path, monkeypatch):
         "first_generated_at",
         "last_generated_at",
     }
+    stored_dashboard = store.latest_dashboard_snapshot("bitcoin", 7)
+    assert stored_dashboard is not None
+    assert stored_dashboard["selected"]["id"] == "bitcoin"
+
+
+def test_dashboard_serves_fresh_persisted_snapshot_without_rebuilding(
+    tmp_path,
+    monkeypatch,
+):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    cached = snapshot_dashboard()
+    cached["generated_at"] = datetime.now(timezone.utc).isoformat()
+    store.record_dashboard_snapshot("bitcoin", 7, cached["generated_at"], cached)
+
+    async def unexpected_build(*_args, **_kwargs):
+        raise AssertionError("A fresh dashboard snapshot should not be rebuilt")
+
+    monkeypatch.setattr(main, "build_dashboard", unexpected_build)
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.get("/api/v1/dashboard?coin=bitcoin&horizon=7")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected"]["id"] == "bitcoin"
+    assert payload["delivery"]["source"] == "snapshot"
+    assert payload["delivery"]["refreshing"] is False
+    assert response.headers["x-dashboard-source"] == "snapshot"
+
+
+def test_dashboard_serves_stale_snapshot_while_refreshing_in_background(
+    tmp_path,
+    monkeypatch,
+):
+    store = ForecastStore(tmp_path / "forecast.sqlite3")
+    store.initialize()
+    cached = snapshot_dashboard()
+    store.record_dashboard_snapshot("bitcoin", 7, cached["generated_at"], cached)
+
+    async def build_fresh_dashboard(_service, coin, horizon):
+        await asyncio.sleep(0)
+        payload = snapshot_dashboard(coin, horizon)
+        payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+        return payload
+
+    monkeypatch.setattr(main, "build_dashboard", build_fresh_dashboard)
+
+    with TestClient(app) as client:
+        app.state.forecast_store = store
+        response = client.get("/api/v1/dashboard?coin=bitcoin&horizon=7")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["generated_at"] == cached["generated_at"]
+    assert payload["delivery"]["source"] == "snapshot"
+    assert payload["delivery"]["refreshing"] is True
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["retry-after"] == "3"
 
 
 def test_snapshot_collector_uses_scheduled_target(tmp_path, monkeypatch):
