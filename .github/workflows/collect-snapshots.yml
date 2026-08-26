@@ -2,7 +2,7 @@ name: Snapshot Collector
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -14,32 +14,59 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
-      - name: Collect scheduled feature snapshot
+      - name: Collect due Sites forecasts
+        shell: bash
         env:
-          SNAPSHOT_TOKEN: ${{ secrets.SNAPSHOT_TOKEN }}
+          SITES_URL: https://cryptovision-forecast.mattila.chatgpt.site
+          SNAPSHOT_TOKEN: ${{ secrets.SITES_SNAPSHOT_TOKEN }}
         run: |
+          set -euo pipefail
+
           if [ -z "$SNAPSHOT_TOKEN" ]; then
-            echo "The SNAPSHOT_TOKEN repository secret is not configured."
+            echo "The SITES_SNAPSHOT_TOKEN repository secret is not configured."
             exit 1
           fi
 
-          curl \
+          response="$(curl \
             --silent \
             --show-error \
             --fail-with-body \
-            --retry 2 \
+            --retry 3 \
             --retry-delay 15 \
             --retry-all-errors \
             --connect-timeout 20 \
-            --max-time 300 \
+            --max-time 600 \
             --request POST \
-            --header "X-Snapshot-Token: $SNAPSHOT_TOKEN" \
-            "https://crypto-backend-pv99.onrender.com/api/v1/internal/snapshots/collect"
+            --header "Authorization: Bearer $SNAPSHOT_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "${SITES_URL}/api/v1/internal/snapshots/collect")"
+
+          jq -e '
+            .generated_at
+            and ((.created | type) == "number")
+            and ((.evaluated | type) == "number")
+            and ((.processed | type) == "array")
+          ' <<<"$response" > /dev/null
+
+          errors="$(jq '[.processed[] | select(.error != null)] | length' <<<"$response")"
+          {
+            echo "### Sites forecast collector"
+            echo ""
+            echo "- Created: $(jq -r '.created' <<<"$response")"
+            echo "- Evaluated: $(jq -r '.evaluated' <<<"$response")"
+            echo "- Processed: $(jq -r '.processed | length' <<<"$response")"
+            echo "- Errors: $errors"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          test "$errors" -eq 0
 
       - name: Verify production services
         shell: bash
+        env:
+          SITES_URL: https://cryptovision-forecast.mattila.chatgpt.site
         run: |
           set -euo pipefail
 
@@ -54,30 +81,33 @@ jobs:
             --max-time 120
           )
 
-          health="$(curl "${curl_flags[@]}" \
-            "https://crypto-backend-pv99.onrender.com/health")"
-          test "$(jq -r '.status' <<<"$health")" = "ok"
-          test "$(jq -r '.storage.backend' <<<"$health")" = "postgresql"
-          test "$(jq -r '.storage.persistent' <<<"$health")" = "true"
-
           data_health="$(curl "${curl_flags[@]}" \
-            "https://crypto-backend-pv99.onrender.com/api/v1/forecast/data-health")"
-          test "$(jq -r '.collector.status' <<<"$data_health")" = "healthy"
+            "${SITES_URL}/api/v1/forecast/data-health")"
+          test "$(jq -r '.storage.backend' <<<"$data_health")" = "cloudflare_d1"
           test "$(jq -r '.storage.persistent' <<<"$data_health")" = "true"
+          test "$(jq -r '.collector.automatic' <<<"$data_health")" = "true"
           test "$(jq -r '.totals.snapshot_count' <<<"$data_health")" -gt 0
 
-          registry="$(curl "${curl_flags[@]}" \
-            "https://crypto-backend-pv99.onrender.com/api/v1/forecast/registry")"
-          test "$(jq -r '.model_version // empty' <<<"$registry")" != ""
+          dashboard="$(curl "${curl_flags[@]}" \
+            "${SITES_URL}/api/v1/dashboard?coin=bitcoin&horizon=7")"
+          jq -e '
+            .selected.current_price > 0
+            and .selected.forecast.target_price > 0
+            and .selected.forecast.prediction_interval.lower_price > 0
+            and .selected.forecast.prediction_interval.upper_price > 0
+          ' <<<"$dashboard" > /dev/null
+
+          markets="$(curl "${curl_flags[@]}" \
+            "${SITES_URL}/api/v1/markets?limit=200")"
+          test "$(jq -r '.count' <<<"$markets")" -ge 100
+          test "$(jq -r '.analysis_limit' <<<"$markets")" -eq 10
 
           frontend_urls=(
-            "https://crypto-frontend-d94v.onrender.com/"
-            "https://crypto-frontend-d94v.onrender.com/market/"
-            "https://crypto-frontend-d94v.onrender.com/forecast/bitcoin/"
-            "https://crypto-frontend-d94v.onrender.com/models/"
-            "https://crypto-frontend-d94v.onrender.com/news/"
-            "https://crypto-frontend-d94v.onrender.com/robots.txt"
-            "https://crypto-frontend-d94v.onrender.com/sitemap.xml"
+            "${SITES_URL}/"
+            "${SITES_URL}/market"
+            "${SITES_URL}/forecast/bitcoin"
+            "${SITES_URL}/models"
+            "${SITES_URL}/news"
           )
 
           for url in "${frontend_urls[@]}"; do
